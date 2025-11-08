@@ -20,6 +20,7 @@ BASE_URL = f"https://{BASE_URL}"
 logging.info(f"检测到的公共服务 URL (BASE_URL): {BASE_URL}")
 
 # 定义需要处理的 Bot ID 列表
+# 确保这里的 ID (1, 4, 6, 9) 与您的应用程序文件 botX_app.py 匹配
 BOT_IDS = [1, 4, 6, 9]
 
 def set_webhook_and_check(bot_id: int, base_url: str):
@@ -34,6 +35,7 @@ def set_webhook_and_check(bot_id: int, base_url: str):
         return False
     
     # 2. 定义 Webhook URL
+    # Webhook URL 格式: https://<您的域名>/bot/<Bot ID>/webhook
     webhook_url = f"{base_url}/bot/{bot_id}/webhook"
     
     # 3. 设置 Webhook
