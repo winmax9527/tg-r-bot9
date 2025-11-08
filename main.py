@@ -1,9 +1,15 @@
 import os
 import logging
 from fastapi import FastAPI, Request
-from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
-from telegram.ext._application import ApplicationBuilder
+from telegram import Update
+# 修正：所有组件都应该从 telegram.ext 导入，以确保兼容性
+from telegram.ext import (
+    Application, 
+    ApplicationBuilder, 
+    CommandHandler, 
+    MessageHandler, 
+    filters
+)
 from typing import Dict, Optional
 
 # --- 配置 ---
@@ -30,12 +36,13 @@ async def start(update: Update, context):
     chat_id = update.effective_chat.id
     bot_token = context.bot.token
     
+    # 根据 token 查找 Bot ID，用于日志和回复
     current_bot_id = next((bot_id for bot_id, token in ACTIVE_BOTS.items() if token == bot_token), "未知")
     
     await context.bot.send_message(
         chat_id=chat_id, 
         text=f"你好！我是 Bot {current_bot_id} (Token 尾号: {bot_token[-4:]})。\n"
-             f"我的 Webhook 正在运行中！"
+             f"我的 Webhook 正在运行中！请给我发送一条消息。"
     )
     logger.info(f"Bot {current_bot_id} 收到 /start 命令 from {chat_id}")
 
@@ -43,8 +50,12 @@ async def echo(update: Update, context):
     """回显用户发送的文本消息"""
     chat_id = update.effective_chat.id
     text = update.message.text
-    await context.bot.send_message(chat_id=chat_id, text=f"你说了: {text}")
-    logger.info(f"Bot 收到消息: {text} from {chat_id}")
+    # 查找 Bot ID
+    bot_token = context.bot.token
+    current_bot_id = next((bot_id for bot_id, token in ACTIVE_BOTS.items() if token == bot_token), "未知")
+    
+    await context.bot.send_message(chat_id=chat_id, text=f"我是 Bot {current_bot_id}，你说了: {text}")
+    logger.info(f"Bot {current_bot_id} 收到消息: {text} from {chat_id}")
 
 # --- 初始化 Bots 和 Applications ---
 def initialize_bots_and_applications():
@@ -61,7 +72,7 @@ def initialize_bots_and_applications():
             application = (
                 ApplicationBuilder()
                 .token(token)
-                .updater(None) # 不需要内置 Updater
+                .updater(None) # Webhook 模式不需要内置 Updater
                 .arbitrary_callback_data(True)
                 .build()
             )
@@ -87,10 +98,9 @@ async def startup_event():
     """应用启动时启动 Bot Application 的后台任务"""
     logger.info("应用启动中... 正在启动 Bot Applications 的后台任务。")
     for token, app_instance in bot_applications.items():
-        # Application.initialize() 必须在 build() 之后和 run_polling/run_webhook 之前调用
-        # 这里只调用 initialize，不调用 run_polling/run_webhook
+        # 必须先 initialize 再 start
         await app_instance.initialize()
-        # 启动 Application 的后台任务
+        # 启动 Application 的后台任务（如处理器和队列）
         await app_instance.start()
         logger.info(f"✅ Bot {token[-4:]} Application 后台任务启动。")
     logger.info("🎉 核心服务启动完成。")
@@ -126,10 +136,10 @@ async def process_webhook(token: str, request: Request):
         # 将 JSON 转换为 Telegram Update 对象
         update = Update.de_json(body, application.bot)
         
-        # 将更新放入 Application 队列
+        # 将更新放入 Application 队列，让后台任务处理
         await application.update_queue.put(update)
         
-        logger.info(f"✅ Bot {token[-4:]} 成功接收并放入队列。")
+        logger.info(f"✅ Bot {token[-4:]} 成功接收更新并放入队列。")
         return {"status": "ok"}
 
     except Exception as e:
