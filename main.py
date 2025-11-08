@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 # --- 2. 全局状态和数据结构 ---
 BOT_APPLICATIONS: Dict[str, Application] = {}
 BOT_API_URLS: Dict[str, str] = {}
-# 这两个将在 startup/shutdown 时被管理
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 
@@ -63,17 +62,23 @@ async def get_final_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到关键字，开始执行 [Playwright] 链接获取...")
 
-    # 检查全局浏览器是否已启动
-    if not BROWSER_INSTANCE or not BROWSER_INSTANCE.is_connected():
-        logger.error("全局浏览器实例 BROWSER_INSTANCE 未运行！Playwright 无法工作。")
+    # ---
+    # --- ⬇️ 关键修复 #1：从 context.bot_data 获取 FastAPI app 实例 ⬇️ ---
+    #
+    fastapi_app = context.bot_data.get("fastapi_app")
+    if not fastapi_app or not hasattr(fastapi_app.state, 'browser') or not fastapi_app.state.browser or not fastapi_app.state.browser.is_connected():
+        logger.error("全局浏览器实例未运行或未连接！Playwright 无法工作。")
         await update.message.reply_text("❌ 服务内部错误：浏览器未启动。")
         return
+    #
+    # --- ⬆️ 关键修复 #1 ⬆️ ---
+    # ---
 
     # 1. 查找此 Bot 专属的 API URL
     current_app = context.application
     api_url_for_this_bot = None
-    for path, app in BOT_APPLICATIONS.items():
-        if app is current_app:
+    for path, app_instance in BOT_APPLICATIONS.items():
+        if app_instance is current_app:
             api_url_for_this_bot = BOT_API_URLS.get(path)
             break
     
@@ -92,7 +97,7 @@ async def get_final_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
     
-    page = None # 确保 page 在 finally 中可被访问
+    page = None 
     
     try:
         # --- 步骤 1: [Requests] 访问 API 获取 域名 A (这步很快) ---
@@ -107,13 +112,18 @@ async def get_final_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         # --- 步骤 2: [Playwright] 访问 域名 A 获取 域名 B (这步处理 JS) ---
         logger.info(f"步骤 2: (Playwright) 正在启动新页面访问 {domain_a}...")
         
-        # 从全局浏览器实例创建新页面
-        page = await BROWSER_INSTANCE.new_page()
+        # ---
+        # --- ⬇️ 关键修复 #2：使用我们刚刚获取的 fastapi_app 实例 ⬇️ ---
+        #
+        page = await fastapi_app.state.browser.new_page()
+        #
+        # --- ⬆️ 关键修复 #2 ⬆️ ---
+        # ---
         page.set_default_timeout(25000) # 25 秒超时
 
-        await page.goto(domain_a, wait_until="networkidle") # 等待网络空闲，确保 JS 执行完毕
+        await page.goto(domain_a, wait_until="networkidle") 
         
-        domain_b = page.url # 获取浏览器当前的最终 URL
+        domain_b = page.url 
         logger.info(f"步骤 2 成功: 获取到 域名 B -> {domain_b}")
 
         # --- 步骤 3: 修改 域名 B 的二级域名 ---
@@ -130,7 +140,7 @@ async def get_final_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(f"❌ 链接获取失败：{type(e).__name__}。")
     finally:
         if page:
-            await page.close() # 关键：一定要关闭页面，否则内存会泄漏！
+            await page.close() 
             logger.info("Playwright 页面已关闭。")
 
 
@@ -171,12 +181,18 @@ async def startup_event():
         api_url_value = os.getenv(api_url_name)
         
         if token_value and api_url_value:
-            logger.info(f"DIAGNOSTIC: 发现 Bot #{i}: Token (尾号: {token_value[-4:]}) 及其专属 API (值: {api_url_value})")
+            logger.info(f"DIAGNOSTIC: D 发现 Bot #{i}: Token (尾号: {token_value[-4:]}) 及其专属 API (值: {api_url_value})")
             
             application = Application.builder().token(token_value).build()
             
-            # 关键：将 app 实例存入 context，以便 handler 能访问 app.state
-            application.state = app 
+            # ---
+            # --- ⬇️ 关键修复 #3：使用 bot_data (推荐方式) 替换 application.state (错误方式) ⬇️ ---
+            #
+            # application.state = app  (这是导致崩溃的第 179 行)
+            application.bot_data["fastapi_app"] = app # 这是正确的做法
+            #
+            # --- ⬆️ 关键修复 #3 ⬆️ ---
+            # ---
             
             await application.initialize()
             
@@ -200,12 +216,11 @@ async def startup_event():
     logger.info("正在启动全局 Playwright 实例...")
     try:
         PLAYWRIGHT_INSTANCE = await async_playwright().start()
-        # 启动 Chromium。我们使用 --no-sandbox 标志，这在 Render 的 Docker 环境中是必需的
         BROWSER_INSTANCE = await PLAYWRIGHT_INSTANCE.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox"]
         )
-        app.state.browser = BROWSER_INSTANCE # 将浏览器实例存入 FastAPI state
+        app.state.browser = BROWSER_INSTANCE 
         logger.info("🎉 全局 Playwright Chromium 浏览器启动成功！")
         logger.info("🎉 核心服务启动完成。等待 Telegram 的 Webhook 消息...")
     except Exception as e:
