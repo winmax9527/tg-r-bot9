@@ -29,7 +29,7 @@ BROWSER_INSTANCE: Browser | None = None
 
 # --- 3. 核心功能：获取动态链接 ---
 
-COMMAND_PATTERN = r"^(苹果链接|ios链接|最新苹果链接|/start_check)$"
+COMMAND_PATTERN = r"^(地址|下载地址|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接|/start_check)$"
 
 # --- 辅助函数 ---
 def generate_random_subdomain(k: int = 3) -> str:
@@ -84,7 +84,7 @@ async def get_final_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # 3. 发送“处理中”提示
     try:
-        await update.message.reply_text("正在为您获取专属动态链接 (JS模式)，请稍候 (约 10-15 秒)...")
+        await update.message.reply_text("正在为您获取专属链接，请稍候 ...")
     except Exception as e:
         logger.warning(f"发送“处理中”消息失败: {e}")
 
