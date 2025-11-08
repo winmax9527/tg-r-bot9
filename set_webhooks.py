@@ -1,99 +1,58 @@
-import requests
 import os
-import sys
+import requests
+import json
 import logging
 
-# 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # --- 配置 ---
-# 自动获取当前部署的公共 URL (Render 或其他 PaaS 环境通常提供)
-BASE_URL = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-# 如果没有找到公共 URL，脚本将无法运行
-if not BASE_URL:
-    logging.error("无法获取 BASE_URL。请确保在 PaaS 环境中运行此脚本，或者手动设置 PUBLIC_URL 环境变量。")
-    sys.exit(1)
+# ⚠️ 请将 BASE_URL 替换为您的实际部署域名
+BASE_URL = "https://tg-r-bot9.onrender.com" 
 
-# 强制使用 HTTPS
-BASE_URL = f"https://{BASE_URL}"
-logging.info(f"检测到的公共服务 URL (BASE_URL): {BASE_URL}")
+# 假设所有 Bot Token 都已作为环境变量设置
+BOT_CONFIGS = {
+    "1": os.environ.get("BOT_TOKEN_1"),
+    "4": os.environ.get("BOT_TOKEN_4"),
+    "6": os.environ.get("BOT_TOKEN_6"),
+    "9": os.environ.get("BOT_TOKEN_9"),
+}
 
-# 定义需要处理的 Bot ID 列表
-BOT_IDS = [1, 4, 6, 9]
+def set_webhook_for_bot(bot_id, token, base_url):
+    """为单个 Bot 设置 Webhook，使用正确的 /webhook 路径。"""
+    if not token:
+        logger.warning(f"Bot {bot_id} Token 未设置，跳过。")
+        return
 
-def set_webhook_and_check(bot_id: int, base_url: str):
-    """设置并检查单个 Bot 的 Webhook 状态"""
+    # 完整的 Webhook URL，现在包含 /webhook 后缀
+    # 这是关键的修改：确保路径末尾有 /webhook
+    webhook_url = f"{base_url}/bot/{token}/webhook"
     
-    # 1. 获取 Bot Token
-    token_env_name = f"TELEGRAM_BOT_TOKEN_{bot_id}"
-    bot_token = os.getenv(token_env_name)
+    # Telegram API URL
+    api_url = f"https://api.telegram.org/bot{token}/setWebhook"
     
-    if not bot_token:
-        logging.warning(f"跳过 Bot {bot_id}：环境变量 {token_env_name} 未设置。")
-        return False
-    
-    # 2. ***关键修正***：Webhook URL 必须使用完整的 Bot Token，因为这是 main.py 挂载的路由。
-    # 挂载路由示例: /bot/8581188998:AAFyKtDqpy6RYCKNXo_rfzqbke9kydynwGg
-    # 注意：我们去掉了 '/webhook' 后缀，并使用 {bot_token} 替换了 {bot_id}
-    webhook_url = f"{base_url}/bot/{bot_token}" 
-    
-    # 3. 设置 Webhook
-    set_url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
-    set_payload = {
+    params = {
         'url': webhook_url,
-        'max_connections': 100, 
+        # 推荐设置允许的更新类型
+        'allowed_updates': json.dumps(["message", "edited_message", "callback_query"])
     }
-    
+
     try:
-        logging.info(f"正在为 Bot {bot_id} 设置 Webhook 到: {webhook_url}")
-        set_response = requests.post(set_url, json=set_payload, timeout=10)
-        set_response.raise_for_status() # 检查 HTTP 错误
+        logger.info(f"正在为 Bot {bot_id} 设置 Webhook 到: {webhook_url}")
         
-        set_result = set_response.json()
-        if set_result.get("ok"):
-            logging.info(f"✅ Bot {bot_id} Webhook 设置成功：{set_result.get('description', 'OK')}")
+        response = requests.post(api_url, data=params, timeout=10)
+        response_data = response.json()
+        
+        if response.status_code == 200 and response_data.get('ok'):
+            logger.info(f"✅ Bot {bot_id} Webhook 设置成功。")
         else:
-            logging.error(f"❌ Bot {bot_id} Webhook 设置失败：{set_result.get('description', '未知错误')}")
-            return False
-
-        # 4. 检查 Webhook 状态
-        get_url = f"https://api.telegram.org/bot{bot_token}/getWebhookInfo"
-        get_response = requests.get(get_url, timeout=10)
-        get_response.raise_for_status()
-        
-        info = get_response.json().get("result", {})
-        current_url = info.get("url", "N/A")
-        
-        if current_url == webhook_url:
-            logging.info(f"✅ Bot {bot_id} Webhook 状态确认：URL 正确。")
-            return True
-        else:
-            logging.warning(f"⚠️ Bot {bot_id} Webhook 状态异常：API 报告 URL 为 {current_url}，期望值为 {webhook_url}")
-            return False
+            logger.error(f"❌ Bot {bot_id} Webhook 设置失败，状态码: {response.status_code}, 错误: {response_data.get('description', '无描述')}")
             
-    except requests.exceptions.RequestException as e:
-        logging.error(f"❌ Bot {bot_id} Webhook API 调用失败：{e}")
-        return False
-    except Exception as e:
-        logging.error(f"❌ Bot {bot_id} 发生未知错误：{e}")
-        return False
-
-
-def main():
-    """主函数，迭代所有 Bot ID 并设置 Webhook"""
-    all_success = True
-    logging.info("--- 开始设置 Telegram Bot Webhooks ---")
-    
-    for bot_id in BOT_IDS:
-        success = set_webhook_and_check(bot_id, BASE_URL)
-        if not success:
-            all_success = False
-
-    logging.info("--- Webhook 设置完成 ---")
-    if all_success:
-        logging.info("🎉 所有已配置的 Bots Webhook 都设置成功！")
-    else:
-        logging.warning("⚠️ 部分或全部 Bots 的 Webhook 设置失败，请检查日志和环境变量。")
+    except requests.RequestException as e:
+        logger.error(f"❌ Bot {bot_id} Webhook 设置请求异常: {e}")
 
 if __name__ == "__main__":
-    main()
+    logger.info(f"开始批量设置 Webhook，Base URL: {BASE_URL}")
+    for bot_id, token in BOT_CONFIGS.items():
+        set_webhook_for_bot(bot_id, token, BASE_URL)
+    logger.info("所有 Bot 的 Webhook 设置完成。")
