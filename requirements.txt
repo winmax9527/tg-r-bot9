@@ -1,6 +1,4 @@
-python-telegram-bot[webhook]
-requests
 fastapi
-gunicorn
+python-telegram-bot
 uvicorn
-playwright
+gunicorn
