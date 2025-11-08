@@ -2,7 +2,7 @@ import os
 import logging
 import asyncio
 import re
-import requests
+import requests # 用于快速获取域名 A
 import random
 import string
 from urllib.parse import urlparse, urlunparse
@@ -10,6 +10,9 @@ from typing import List, Dict
 from fastapi import FastAPI, Request, Response
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+# 引入 Playwright
+from playwright.async_api import async_playwright, Playwright, Browser
 
 # --- 1. 配置日志记录 (Logging Setup) ---
 logging.basicConfig(
@@ -19,14 +22,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- 2. 全局状态和数据结构 ---
-# 存储 Bot 实例 (按 webhook 路径索引)
 BOT_APPLICATIONS: Dict[str, Application] = {}
-# 存储 Bot 专属的 API URL (按 webhook 路径索引)
 BOT_API_URLS: Dict[str, str] = {}
+# 这两个将在 startup/shutdown 时被管理
+PLAYWRIGHT_INSTANCE: Playwright | None = None
+BROWSER_INSTANCE: Browser | None = None
 
-# --- 3. 核心功能：获取动态链接 (这就是您要的功能) ---
+# --- 3. 核心功能：获取动态链接 ---
 
-# 定义触发关键字 (正则表达式)
 COMMAND_PATTERN = r"^(苹果链接|ios链接|最新苹果链接|/start_check)$"
 
 # --- 辅助函数 ---
@@ -35,11 +38,7 @@ def generate_random_subdomain(k: int = 3) -> str:
     return ''.join(random.choices(string.ascii_letters + string.digits, k=k))
 
 def modify_url_subdomain(url_str: str, new_sub: str) -> str:
-    """
-    替换 URL 的二级域名。
-    例如：modify_url_subdomain("https://sub.example.com/path", "xyz")
-    返回: "https://xyz.example.com/path"
-    """
+    """替换 URL 的二级域名"""
     try:
         parsed = urlparse(url_str)
         domain_parts = parsed.netloc.split('.')
@@ -52,135 +51,132 @@ def modify_url_subdomain(url_str: str, new_sub: str) -> str:
         logger.error(f"修改子域名失败: {e} - URL: {url_str}")
         return url_str
 
-# --- 核心处理器 ---
+# --- 核心处理器 (使用 Playwright) ---
 async def get_final_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     完整的多步骤获取链接流程：
-    1. 访问 API_URL_FOR_A 获取 域名 A
-    2. 访问 域名 A 获取 域名 B
+    1. [Requests] 访问 API 获取 域名 A
+    2. [Playwright] 访问 域名 A 获取 域名 B
     3. 修改 域名 B 的二级域名
     4. 发送最终 URL
     """
     bot_token_end = context.application.bot.token[-4:]
-    logger.info(f"Bot {bot_token_end} 收到关键字，开始执行多步链接获取...")
+    logger.info(f"Bot {bot_token_end} 收到关键字，开始执行 [Playwright] 链接获取...")
 
-    # --- 
-    # 关键修改：根据当前 Bot 实例查找其对应的 Webhook 路径和 API URL
-    # ---
+    # 检查全局浏览器是否已启动
+    if not BROWSER_INSTANCE or not BROWSER_INSTANCE.is_connected():
+        logger.error("全局浏览器实例 BROWSER_INSTANCE 未运行！Playwright 无法工作。")
+        await update.message.reply_text("❌ 服务内部错误：浏览器未启动。")
+        return
+
+    # 1. 查找此 Bot 专属的 API URL
     current_app = context.application
-    webhook_path = None
     api_url_for_this_bot = None
-    
     for path, app in BOT_APPLICATIONS.items():
         if app is current_app:
-            webhook_path = path
-            api_url_for_this_bot = BOT_API_URLS.get(path) # 从我们的新字典中查找 API URL
+            api_url_for_this_bot = BOT_API_URLS.get(path)
             break
     
     if not api_url_for_this_bot:
-        logger.error(f"Bot (尾号: {bot_token_end}) 无法找到其配置的 API URL！(Webhook 路径: {webhook_path})")
+        logger.error(f"Bot (尾号: {bot_token_end}) 无法找到其配置的 API URL！")
         await update.message.reply_text("❌ 服务配置错误：未找到此 Bot 的 API 地址。")
         return
 
-    # 1. 发送“处理中”提示
+    # 2. 发送“处理中”提示
     try:
-        await update.message.reply_text("正在为您获取专属动态链接，请稍候...")
+        await update.message.reply_text("正在为您获取专属动态链接 (JS模式)，请稍候 (约 10-15 秒)...")
     except Exception as e:
         logger.warning(f"发送“处理中”消息失败: {e}")
 
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
-
+    
+    page = None # 确保 page 在 finally 中可被访问
+    
     try:
-        # --- 步骤 1: 访问 API 获取 域名 A ---
-        logger.info(f"步骤 1: Bot {bot_token_end} 正在从其专属 API [{api_url_for_this_bot}] 获取 域名 A...")
+        # --- 步骤 1: [Requests] 访问 API 获取 域名 A (这步很快) ---
+        logger.info(f"步骤 1: (Requests) 正在从 API [{api_url_for_this_bot}] 获取 域名 A...")
         response_api = requests.get(api_url_for_this_bot, headers=headers, timeout=10)
         response_api.raise_for_status() 
-        
         domain_a = response_api.text.strip()
         if not domain_a.startswith(('http://', 'https://')):
             domain_a = 'http://' + domain_a
-            
         logger.info(f"步骤 1 成功: 获取到 域名 A -> {domain_a}")
 
-        # --- 步骤 2: 访问 域名 A 获取 域名 B (跟踪重定向) ---
-        logger.info(f"步骤 2: 正在访问 {domain_a} 以获取 域名 B...")
-        response_redirect = requests.get(domain_a, headers=headers, allow_redirects=True, timeout=15)
-        response_redirect.raise_for_status()
+        # --- 步骤 2: [Playwright] 访问 域名 A 获取 域名 B (这步处理 JS) ---
+        logger.info(f"步骤 2: (Playwright) 正在启动新页面访问 {domain_a}...")
         
-        domain_b = response_redirect.url
+        # 从全局浏览器实例创建新页面
+        page = await BROWSER_INSTANCE.new_page()
+        page.set_default_timeout(25000) # 25 秒超时
+
+        await page.goto(domain_a, wait_until="networkidle") # 等待网络空闲，确保 JS 执行完毕
+        
+        domain_b = page.url # 获取浏览器当前的最终 URL
         logger.info(f"步骤 2 成功: 获取到 域名 B -> {domain_b}")
 
         # --- 步骤 3: 修改 域名 B 的二级域名 ---
         logger.info(f"步骤 3: 正在为 {domain_b} 生成 3 位随机二级域名...")
         random_sub = generate_random_subdomain(3)
         final_modified_url = modify_url_subdomain(domain_b, random_sub)
-        
         logger.info(f"步骤 3 成功: 最终 URL -> {final_modified_url}")
 
         # --- 步骤 4: 发送最终 URL ---
         await update.message.reply_text(f"✅ 您的专属链接已生成：\n{final_modified_url}")
 
-    except requests.exceptions.Timeout:
-        logger.error("链接获取超时 (Timeout)")
-        await update.message.reply_text("❌ 链接获取失败：请求超时。")
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"HTTP 错误: {e}")
-        await update.message.reply_text(f"❌ 链接获取失败：目标服务器返回错误 (HTTP {e.response.status_code})。")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"链接获取出现网络错误: {e}")
-        await update.message.reply_text(f"❌ 链接获取失败，出现网络错误。")
     except Exception as e:
-        logger.error(f"处理 get_final_url 时发生未知错误: {e}")
-        await update.message.reply_text(f"❌ 处理请求时发生内部错误。")
+        logger.error(f"处理 get_final_url (Playwright) 时发生错误: {e}")
+        await update.message.reply_text(f"❌ 链接获取失败：{type(e).__name__}。")
+    finally:
+        if page:
+            await page.close() # 关键：一定要关闭页面，否则内存会泄漏！
+            logger.info("Playwright 页面已关闭。")
 
 
-# --- 4. Bot 启动与停止逻辑 ---
+# --- 4. Bot 启动与停止逻辑 (与之前相同) ---
 def setup_bot(app_instance: Application, bot_index: int) -> None:
-    """配置 Bot 的所有处理器 (Handlers)。"""
     token_end = app_instance.bot.token[-4:]
     logger.info(f"Bot Application 实例 (#{bot_index}, 尾号: {token_end}) 正在配置 Handlers。")
-
     app_instance.add_handler(
         MessageHandler(
             filters.TEXT & filters.Regex(COMMAND_PATTERN), 
             get_final_url
         )
     )
-    
     async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_html(f"🤖 Bot #{bot_index} (尾号: {token_end}) 已准备就绪。\n请发送关键字 (如: 苹果链接) 来获取动态链接。")
-    
     app_instance.add_handler(CommandHandler("start", start_command))
     
 
 # --- 5. FastAPI 应用实例 ---
-app = FastAPI(title="Multi-Bot Dynamic Link Service")
+app = FastAPI(title="Multi-Bot Playwright Service")
 
-# --- 6. 应用启动时，初始化所有 Bot ---
+# --- 6. 应用启动/关闭事件 (关键：管理全局浏览器) ---
 @app.on_event("startup")
 async def startup_event():
-    """在 FastAPI 启动时初始化所有 Bot Application 实例。"""
+    """在 FastAPI 启动时：1. 初始化 Bot 2. 启动全局 Playwright 浏览器"""
     
-    global BOT_APPLICATIONS, BOT_API_URLS
+    global BOT_APPLICATIONS, BOT_API_URLS, PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
     BOT_APPLICATIONS = {}
     BOT_API_URLS = {}
 
     logger.info("应用启动中... 正在查找 Bot Token 和 专属 API URL。")
 
-    for i in range(1, 10): # 检查 1 到 9
+    # 6.1 初始化所有 Bot (和之前一样)
+    for i in range(1, 10): 
         token_name = f"BOT_TOKEN_{i}"
-        api_url_name = f"BOT_{i}_API_URL" # 匹配您截图中的 Key
-        
+        api_url_name = f"BOT_{i}_API_URL"
         token_value = os.getenv(token_name)
-        api_url_value = os.getenv(api_url_name) # 获取专属 API URL
+        api_url_value = os.getenv(api_url_name)
         
-        # 必须同时找到 Token 和 专属 API URL，这个 Bot 才算配置完整
         if token_value and api_url_value:
             logger.info(f"DIAGNOSTIC: 发现 Bot #{i}: Token (尾号: {token_value[-4:]}) 及其专属 API (值: {api_url_value})")
             
             application = Application.builder().token(token_value).build()
+            
+            # 关键：将 app 实例存入 context，以便 handler 能访问 app.state
+            application.state = app 
             
             await application.initialize()
             
@@ -188,7 +184,7 @@ async def startup_event():
             
             webhook_path = f"bot{i}_webhook"
             BOT_APPLICATIONS[webhook_path] = application
-            BOT_API_URLS[webhook_path] = api_url_value # 关键：存储这个 Bot 的专属 API URL
+            BOT_API_URLS[webhook_path] = api_url_value 
             
             logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已创建并初始化。监听路径: /{webhook_path}")
             
@@ -199,44 +195,68 @@ async def startup_event():
         logger.error("❌ 未找到任何配置完整的 Bot (必须同时有 Token 和 专属 API URL)。")
     else:
         logger.info(f"✅ 成功初始化 {len(BOT_APPLICATIONS)} 个 Bot 实例。")
-        logger.info("🎉 核心服务启动完成。等待 Telegram 的 Webhook 消息...")
 
-# --- 7. 动态 Webhook 路由 ---
+    # 6.2 启动 Playwright
+    logger.info("正在启动全局 Playwright 实例...")
+    try:
+        PLAYWRIGHT_INSTANCE = await async_playwright().start()
+        # 启动 Chromium。我们使用 --no-sandbox 标志，这在 Render 的 Docker 环境中是必需的
+        BROWSER_INSTANCE = await PLAYWRIGHT_INSTANCE.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox"]
+        )
+        app.state.browser = BROWSER_INSTANCE # 将浏览器实例存入 FastAPI state
+        logger.info("🎉 全局 Playwright Chromium 浏览器启动成功！")
+        logger.info("🎉 核心服务启动完成。等待 Telegram 的 Webhook 消息...")
+    except Exception as e:
+        logger.error(f"❌ 启动 Playwright 失败: {e}")
+        logger.error("服务将启动，但 Playwright 功能将无法工作！")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """在 FastAPI 关闭时，优雅地关闭浏览器和 Playwright"""
+    logger.info("应用关闭中...")
+    if BROWSER_INSTANCE:
+        await BROWSER_INSTANCE.close()
+        logger.info("全局浏览器已关闭。")
+    if PLAYWRIGHT_INSTANCE:
+        await PLAYWRIGHT_INSTANCE.stop()
+        logger.info("Playwright 实例已停止。")
+    logger.info("应用关闭完成。")
+
+# --- 7. 动态 Webhook 路由 (与之前相同) ---
 @app.post("/{webhook_path}")
 async def handle_webhook(webhook_path: str, request: Request):
-    
     if webhook_path not in BOT_APPLICATIONS:
         logger.warning(f"收到未知路径的请求: /{webhook_path}")
         return Response(status_code=404) 
-
     application = BOT_APPLICATIONS[webhook_path]
-    
     try:
         update_data = await request.json()
         update = Update.de_json(update_data, application.bot)
-        
         await application.process_update(update)
-        
         return Response(status_code=200) # OK
-        
     except Exception as e:
         logger.error(f"处理 Webhook 请求失败 (路径: /{webhook_path})：{e}")
         return Response(status_code=500) 
 
-# --- 8. 健康检查路由 ---
+# --- 8. 健康检查路由 (与之前相同) ---
 @app.get("/")
 async def root():
-    """健康检查路由，返回 Bot 状态信息。"""
+    browser_status = "未运行"
+    if BROWSER_INSTANCE and BROWSER_INSTANCE.is_connected():
+        browser_status = f"运行中 (Version: {BROWSER_INSTANCE.version})"
+
     active_bots_info = {}
     for path, app in BOT_APPLICATIONS.items():
         active_bots_info[path] = {
             "token_end": app.bot.token[-4:],
             "api_url": BOT_API_URLS.get(path, "未设置!")
         }
-        
     status = {
         "status": "OK",
-        "message": "Telegram Multi-Bot (Per-Bot API URL) service is running.",
+        "message": "Telegram Multi-Bot (Playwright JS) service is running.",
+        "browser_status": browser_status,
         "active_bots_count": len(BOT_APPLICATIONS),
         "active_bots_info": active_bots_info
     }
