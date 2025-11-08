@@ -62,19 +62,14 @@ async def get_final_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到关键字，开始执行 [Playwright] 链接获取...")
 
-    # ---
-    # --- ⬇️ 关键修复 #1：从 context.bot_data 获取 FastAPI app 实例 ⬇️ ---
-    #
+    # 1. 检查浏览器
     fastapi_app = context.bot_data.get("fastapi_app")
     if not fastapi_app or not hasattr(fastapi_app.state, 'browser') or not fastapi_app.state.browser or not fastapi_app.state.browser.is_connected():
         logger.error("全局浏览器实例未运行或未连接！Playwright 无法工作。")
         await update.message.reply_text("❌ 服务内部错误：浏览器未启动。")
         return
-    #
-    # --- ⬆️ 关键修复 #1 ⬆️ ---
-    # ---
 
-    # 1. 查找此 Bot 专属的 API URL
+    # 2. 查找此 Bot 专属的 API URL
     current_app = context.application
     api_url_for_this_bot = None
     for path, app_instance in BOT_APPLICATIONS.items():
@@ -87,7 +82,7 @@ async def get_final_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("❌ 服务配置错误：未找到此 Bot 的 API 地址。")
         return
 
-    # 2. 发送“处理中”提示
+    # 3. 发送“处理中”提示
     try:
         await update.message.reply_text("正在为您获取专属动态链接 (JS模式)，请稍候 (约 10-15 秒)...")
     except Exception as e:
@@ -104,21 +99,31 @@ async def get_final_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.info(f"步骤 1: (Requests) 正在从 API [{api_url_for_this_bot}] 获取 域名 A...")
         response_api = requests.get(api_url_for_this_bot, headers=headers, timeout=10)
         response_api.raise_for_status() 
-        domain_a = response_api.text.strip()
+
+        # ---
+        # --- ⬇️ 关键修复：解析 JSON 并提取 "data" 字段 ⬇️ ---
+        #
+        api_data = response_api.json() # 将响应解析为 Python 字典
+        
+        if api_data.get("code") != 0 or "data" not in api_data or not api_data["data"]:
+            logger.error(f"API 返回了错误或无效的数据: {api_data}")
+            await update.message.reply_text("❌ 链接获取失败：API 未返回有效链接。")
+            return
+
+        domain_a = api_data["data"].strip() # 这才是我们想要的真实 URL
+        #
+        # --- ⬆️ 关键修复 ⬆️ ---
+        # ---
+
         if not domain_a.startswith(('http://', 'https://')):
             domain_a = 'http://' + domain_a
-        logger.info(f"步骤 1 成功: 获取到 域名 A -> {domain_a}")
+            
+        logger.info(f"步骤 1 成功: 获取到 域名 A -> {domain_a}") # 这次日志会是正确的 URL
 
         # --- 步骤 2: [Playwright] 访问 域名 A 获取 域名 B (这步处理 JS) ---
         logger.info(f"步骤 2: (Playwright) 正在启动新页面访问 {domain_a}...")
         
-        # ---
-        # --- ⬇️ 关键修复 #2：使用我们刚刚获取的 fastapi_app 实例 ⬇️ ---
-        #
         page = await fastapi_app.state.browser.new_page()
-        #
-        # --- ⬆️ 关键修复 #2 ⬆️ ---
-        # ---
         page.set_default_timeout(25000) # 25 秒超时
 
         await page.goto(domain_a, wait_until="networkidle") 
@@ -162,7 +167,7 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
 # --- 5. FastAPI 应用实例 ---
 app = FastAPI(title="Multi-Bot Playwright Service")
 
-# --- 6. 应用启动/关闭事件 (关键：管理全局浏览器) ---
+# --- 6. 应用启动/关闭事件 (与之前相同) ---
 @app.on_event("startup")
 async def startup_event():
     """在 FastAPI 启动时：1. 初始化 Bot 2. 启动全局 Playwright 浏览器"""
@@ -173,7 +178,6 @@ async def startup_event():
 
     logger.info("应用启动中... 正在查找 Bot Token 和 专属 API URL。")
 
-    # 6.1 初始化所有 Bot (和之前一样)
     for i in range(1, 10): 
         token_name = f"BOT_TOKEN_{i}"
         api_url_name = f"BOT_{i}_API_URL"
@@ -181,18 +185,10 @@ async def startup_event():
         api_url_value = os.getenv(api_url_name)
         
         if token_value and api_url_value:
-            logger.info(f"DIAGNOSTIC: D 发现 Bot #{i}: Token (尾号: {token_value[-4:]}) 及其专属 API (值: {api_url_value})")
+            logger.info(f"DIAGNOSTIC: 发现 Bot #{i}: Token (尾号: {token_value[-4:]}) 及其专属 API (值: {api_url_value})")
             
             application = Application.builder().token(token_value).build()
-            
-            # ---
-            # --- ⬇️ 关键修复 #3：使用 bot_data (推荐方式) 替换 application.state (错误方式) ⬇️ ---
-            #
-            # application.state = app  (这是导致崩溃的第 179 行)
-            application.bot_data["fastapi_app"] = app # 这是正确的做法
-            #
-            # --- ⬆️ 关键修复 #3 ⬆️ ---
-            # ---
+            application.bot_data["fastapi_app"] = app
             
             await application.initialize()
             
@@ -205,14 +201,13 @@ async def startup_event():
             logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已创建并初始化。监听路径: /{webhook_path}")
             
         elif token_value and not api_url_value:
-            logger.warning(f"DIAGNOSTIC: 发现 Bot #{i} 的 Token，但未找到 {api_url_name}。此 Bot 将无法工作。")
+            logger.warning(f"DIAGNTIC: 发现 Bot #{i} 的 Token，但未找到 {api_url_name}。此 Bot 将无法工作。")
 
     if not BOT_APPLICATIONS:
         logger.error("❌ 未找到任何配置完整的 Bot (必须同时有 Token 和 专属 API URL)。")
     else:
         logger.info(f"✅ 成功初始化 {len(BOT_APPLICATIONS)} 个 Bot 实例。")
 
-    # 6.2 启动 Playwright
     logger.info("正在启动全局 Playwright 实例...")
     try:
         PLAYWRIGHT_INSTANCE = await async_playwright().start()
