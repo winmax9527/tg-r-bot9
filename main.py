@@ -38,6 +38,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "\n\n请发送消息给我，我会复读你的内容！"
         "\n你可以使用 /help 查看可用命令。"
     )
+    # 使用 reply_html 可以在 Telegram 中渲染 Markdown 或 HTML 格式
     await update.message.reply_html(message)
 
 # /help 命令
@@ -130,9 +131,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if BOT_APPLICATIONS:
         # 在后台以非阻塞方式启动所有 Bot 的轮询
         for app_instance in BOT_APPLICATIONS:
-            # 使用 asyncio.create_task 在后台启动轮询
-            # 注意: run_polling 是一个阻塞调用，必须在 task 中运行
-            asyncio.create_task(app_instance.run_polling(drop_pending_updates=True, stop_on_shutdown=True))
+            # 修正: 移除不再支持的 'stop_on_shutdown=True' 参数
+            asyncio.create_task(app_instance.run_polling(drop_pending_updates=True))
         logger.info("🎉 核心服务启动完成。所有 Bot 已开始轮询。")
     else:
         logger.warning("服务启动完成，但没有 Bot 运行。")
