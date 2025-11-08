@@ -14,9 +14,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- 2. 全局状态和数据结构 ---
-# 存储所有 Bot Application 实例，用 Token 尾号作为索引
 BOT_APPLICATIONS: Dict[str, Application] = {}
-# 存储 Token 和它们对应的 Webhook 路径
 BOT_WEBHOOK_PATHS: Dict[str, str] = {}
 
 # --- 3. Bot 核心命令处理函数 (Handlers) ---
@@ -25,8 +23,6 @@ BOT_WEBHOOK_PATHS: Dict[str, str] = {}
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """回复 /start 命令，并显示当前 Bot ID。"""
     bot_token_end = context.application.bot.token[-4:]
-    
-    # 尝试查找 Bot ID
     bot_index = "N/A"
     for path, app in BOT_APPLICATIONS.items():
         if app.bot.token == context.application.bot.token:
@@ -83,7 +79,6 @@ async def startup_event():
 
     logger.info("应用启动中... 正在查找 Bot Token 并创建 Application 实例。")
 
-    # 查找环境变量中的 Bot Token (1, 4, 6, 9 等)
     for i in range(1, 10): # 检查 BOT_TOKEN_1 到 BOT_TOKEN_9
         token_name = f"BOT_TOKEN_{i}"
         token_value = os.getenv(token_name)
@@ -94,17 +89,23 @@ async def startup_event():
             # 创建 Application 实例
             application = Application.builder().token(token_value).build()
             
+            # --- 
+            # --- ⬇️ 关键修复：就是这一行！⬇️ ---
+            #
+            # 必须在添加 Handlers 之前，异步初始化 Application
+            await application.initialize()
+            #
+            # --- ⬆️ 关键修复：就是这一行！⬆️ ---
+            # --- 
+            
             # 配置 Handlers (复读机功能)
             setup_bot(application, i)
             
-            # 定义此 Bot 的 Webhook 路径
             webhook_path = f"bot{i}_webhook"
-            
-            # 存储实例和路径
             BOT_APPLICATIONS[webhook_path] = application
             BOT_WEBHOOK_PATHS[token_value] = webhook_path
             
-            logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已创建。监听路径: /{webhook_path}")
+            logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已创建并初始化。监听路径: /{webhook_path}")
             
         else:
             logger.info(f"DIAGNOSTIC: 环境变量 {token_name} 未设置。")
@@ -120,25 +121,21 @@ async def startup_event():
 async def handle_webhook(webhook_path: str, request: Request):
     """
     这是一个统一的入口点，用于处理所有 Bot 的 Webhook 消息。
-    它会根据访问的路径 (e.g., /bot1_webhook) 找到对应的 Bot 实例来处理消息。
     """
     
     if webhook_path not in BOT_APPLICATIONS:
         logger.warning(f"收到未知路径的请求: /{webhook_path}")
         return Response(status_code=404) # Not Found
 
-    # 找到对应的 Bot Application 实例
     application = BOT_APPLICATIONS[webhook_path]
     token_end = application.bot.token[-4:]
     
     try:
-        # 从请求中解析 Update 对象
         update_data = await request.json()
         update = Update.de_json(update_data, application.bot)
         
-        logger.info(f"Bot (尾号: {token_end}) 收到 Webhook 请求 (路径: /{webhook_path})")
+        logger.info(f"Bot (尾号: {token_end}) 正在处理 Webhook 请求 (路径: /{webhook_path})")
         
-        # 核心：将 Update 对象交给 Bot 实例处理
         await application.process_update(update)
         
         return Response(status_code=200) # OK
