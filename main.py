@@ -19,8 +19,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Multi-Bot Telegram Handler")
 
 # --- 3. 全局状态和数据结构 ---
-# 存储所有有效 Bot Token 和对应的 Application 对象
-TOKEN_BOTS: List[Tuple[str, Callable[[Application, int], Awaitable[None]]]] = []
+# 存储所有 Bot Application 实例
 BOT_APPLICATIONS: List[Application] = []
 
 # --- 4. Bot 核心命令处理函数 (Handlers) ---
@@ -29,7 +28,6 @@ BOT_APPLICATIONS: List[Application] = []
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """回复 /start 命令，并显示当前 Bot ID。"""
     # 从 context.application.bot.token 获取当前 Bot 的 Token
-    # 我们可以通过这个 Token 来识别是哪个 Bot 实例在回复
     bot_token_end = context.application.bot.token[-4:]
     
     # 尝试查找 BOT_APPLICATIONS 列表，看它是第几个 Bot
@@ -45,6 +43,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "\n\n请发送消息给我，我会复读你的内容！"
         "\n你可以使用 /help 查看可用命令。"
     )
+    # 使用 reply_html 发送消息
     await update.message.reply_html(message)
 
 # /help 命令
@@ -56,6 +55,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/help - 显示此帮助信息\n"
         "\n任何其他消息将作为文本复读。"
     )
+    # 使用 reply_html 发送消息
     await update.message.reply_html(message)
 
 # 消息处理函数（复读功能）
@@ -63,6 +63,7 @@ async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """复读用户发送的文本消息。"""
     if update.message and update.message.text:
         text = update.message.text
+        # 记录 Bot Token 的末尾四位进行诊断
         logger.info(f"Bot {context.application.bot.token[-4:]} 收到消息: {text[:50]}...")
         await update.message.reply_text(f"你说了: \n\n{text}")
 
@@ -88,7 +89,8 @@ async def start_bots():
     
     # 1. 查找环境变量中的 Bot Token
     token_list = []
-    for i in range(1, 10): # 检查 BOT_TOKEN_1 到 BOT_TOKEN_9
+    # 检查 BOT_TOKEN_1 到 BOT_TOKEN_9
+    for i in range(1, 10): 
         token_name = f"BOT_TOKEN_{i}"
         token_value = os.getenv(token_name)
         if token_value:
@@ -135,6 +137,7 @@ async def on_startup():
     if BOT_APPLICATIONS:
         # 在后台以非阻塞方式启动所有 Bot 的轮询
         for app_instance in BOT_APPLICATIONS:
+            # 使用 asyncio.create_task 在后台启动轮询
             asyncio.create_task(app_instance.run_polling(drop_pending_updates=True, stop_on_shutdown=True))
         logger.info("🎉 核心服务启动完成。所有 Bot 已开始轮询。")
     else:
@@ -149,6 +152,7 @@ async def on_shutdown():
     # 优雅地停止所有 Bot 的轮询
     for app_instance in BOT_APPLICATIONS:
         try:
+            # 使用 shutdown() 优雅地停止轮询任务
             await app_instance.shutdown()
         except Exception as e:
             logger.error(f"Bot Application 关闭失败 (Token 尾号: {app_instance.bot.token[-4:]})：{e}")
@@ -157,7 +161,7 @@ async def on_shutdown():
 
 
 # --- 7. 健康检查路由 ---
-# 这是一个必要的路由，确保 Render 知道应用正在运行
+# 这是一个必要的路由，确保 web 容器知道应用正在运行
 @app.get("/")
 async def root():
     """健康检查路由，返回 Bot 状态信息。"""
