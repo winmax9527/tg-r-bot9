@@ -1,46 +1,65 @@
-import os
-import uvicorn
-import asyncio
 import logging
-from fastapi import FastAPI, Request
+import os
 from contextlib import asynccontextmanager
-from bot1_app import bot1_app
-from bot4_app import bot4_app
-from bot6_app import bot6_app
-from bot9_app import bot9_app
+from fastapi import FastAPI
 
-# --- 基础配置 ---
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("main")
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# --- 应用生命周期管理 ---
+BOT_ROUTERS = []
+BOT_KEYS = ["1", "4", "6", "9"]
+
+for key in BOT_KEYS:
+    try:
+        module_name = f"bot{key}_app"
+        module = __import__(module_name)
+        router = getattr(module, "router")
+        
+        BOT_ROUTERS.append({
+            "router": router,
+            "token_key": key,
+            "tags": [f"bot{key}_service"]
+        })
+        logger.info(f"成功导入 {module_name}.router")
+
+    except Exception as e:
+        logger.warning(f"导入 Bot {key} 失败: {e}")
+
+BOT_TOKENS = {
+    "1": os.getenv("TELEGRAM_BOT_TOKEN_1"),
+    "4": os.getenv("TELEGRAM_BOT_TOKEN_4"),
+    "6": os.getenv("TELEGRAM_BOT_TOKEN_6"),
+    "9": os.getenv("TELEGRAM_BOT_TOKEN_9"),
+}
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 应用启动时执行
-    logger.info("应用启动中...")
-    # 这里可以添加一些初始化任务，如检查 Webhook 状态等
+    logger.info("应用启动中... 动态挂载 Bot 路由。")
+    
+    for config in BOT_ROUTERS:
+        token_key = config["token_key"]
+        token = BOT_TOKENS.get(token_key)
+        
+        if not token:
+            logger.warning(f"TELEGRAM_BOT_TOKEN_{token_key} 环境变量未找到，Bot {token_key} 未挂载。")
+            continue
+            
+        try:
+            prefix = f"/bot/{token}"
+            app.include_router(
+                config["router"],
+                prefix=prefix,
+                tags=config["tags"]
+            )
+            logger.info(f"✅ 成功挂载 Bot {token_key} 至路由: {prefix}")
+        except Exception as e:
+            logger.error(f"❌ 挂载 Bot {token_key} 时出错: {e}")
+    
     yield
-    # 应用关闭时执行
     logger.info("应用关闭中...")
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(title="统一 Telegram Bot Webhook 系统", lifespan=lifespan)
 
-# --- 根路径测试路由 ---
-# 这解释了为什么 35.197.118.178:0 - "GET / HTTP/1.1" 200 是成功的
 @app.get("/")
 def read_root():
-    return {"message": "Telegram Bot Service is Running"}
-
-# --- 核心：挂载 Bot 路由 (确保路径正确) ---
-# 必须使用 prefix=/botX 来匹配 Telegram Webhook URL
-# Webhook URL 示例: https://tg-r-bot9.onrender.com/bot1/webhook
-app.include_router(bot1_app, prefix="/bot1")
-app.include_router(bot4_app, prefix="/bot4")
-app.include_router(bot6_app, prefix="/bot6")
-app.include_router(bot9_app, prefix="/bot9")
-
-# --- 启动配置 (Render 部署标准) ---
-if __name__ == "__main__":
-    # 使用 Render 提供的 PORT 环境变量
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    return {"status": "ok", "message": "Unified Bot System is running"}
