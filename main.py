@@ -1,206 +1,172 @@
 import os
-import asyncio
-from typing import Dict, List, Any
-
-from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, CommandHandler, ApplicationBuilder
-from fastapi import FastAPI, Request
-import uvicorn
 import logging
+import asyncio
+from typing import List, Tuple, Callable, Awaitable
+from fastapi import FastAPI
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# 配置日志
+# --- 1. 配置日志记录 (Logging Setup) ---
+# 设置 Python 日志格式，确保日志信息清晰
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- FastAPI 和 Telegram 应用初始化 ---
-# FastAPI 主应用，用于处理 Webhook 请求
-app = FastAPI()
+# --- 2. FastAPI 应用实例 ---
+# Gunicorn worker 将加载此应用实例
+app = FastAPI(title="Multi-Bot Telegram Handler")
 
-# 存储所有 Telegram Application 实例
-applications: Dict[str, Application] = {}
-# 存储所有 Bot 的 URL 路径映射 (例如: "1" -> "/webhook/bot1")
-bot_url_paths: Dict[str, str] = {}
-# 存储所有 Bot 的启动后台任务
-bot_tasks: List[asyncio.Task] = []
+# --- 3. 全局状态和数据结构 ---
+# 存储所有有效 Bot Token 和对应的 Application 对象
+TOKEN_BOTS: List[Tuple[str, Callable[[Application, int], Awaitable[None]]]] = []
+BOT_APPLICATIONS: List[Application] = []
 
+# --- 4. Bot 核心命令处理函数 (Handlers) ---
 
-# --- 配置文件路径（请确保这些文件存在于您的项目根目录）---
-# 导入各个 Bot 的逻辑函数 (假设它们都在各自的文件中)
-# 
-# 确保您的项目根目录存在以下文件:
-# bot1_app.py, bot4_app.py, bot6_app.py, bot9_app.py
-from bot1_app import setup_bot_1
-from bot4_app import setup_bot_4
-from bot6_app import setup_bot_6
-from bot9_app import setup_bot_9
-
-# 将所有 Bot 的设置函数集中到一个字典中
-BOT_SETUPS = {
-    "1": setup_bot_1,
-    "4": setup_bot_4,
-    "6": setup_bot_6,
-    "9": setup_bot_9,
-}
-
-# --- 核心逻辑：加载配置并初始化 Bots ---
-
-def load_config():
-    """从环境变量中加载 Bot Token 并构建配置。"""
-    logger.info("应用启动中... 正在启动 Bot Applications 的后台任务。")
-    config = {}
-    tokens_found = 0
+# /start 命令
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """回复 /start 命令，并显示当前 Bot ID。"""
+    # 从 context.application.bot.token 获取当前 Bot 的 Token
+    # 我们可以通过这个 Token 来识别是哪个 Bot 实例在回复
+    bot_token_end = context.application.bot.token[-4:]
     
-    # --------------------------------------------------------------------
-    # 核心：寻找 BOT_TOKEN_N 变量，与 Render 仪表板配置匹配
-    # --------------------------------------------------------------------
-    for bot_id in BOT_SETUPS.keys():
-        token_key = f"BOT_TOKEN_{bot_id}" # 查找 BOT_TOKEN_1, BOT_TOKEN_4, etc.
-        token = os.environ.get(token_key)
-        
-        if token:
-            config[bot_id] = {
-                "token": token,
-                "url_path": f"/webhook/bot{bot_id}",
-                # 从环境变量加载 API URL
-                "api_url": os.environ.get(f"BOT_{bot_id}_API_URL")
-            }
-            # 诊断信息显示成功找到 Token
-            logger.info(f"DIAGNOSTIC: 环境变量 {token_key} 已设置。")
-            tokens_found += 1
+    # 尝试查找 BOT_APPLICATIONS 列表，看它是第几个 Bot
+    bot_index = -1
+    for idx, app_instance in enumerate(BOT_APPLICATIONS, 1):
+        if app_instance.bot.token == context.application.bot.token:
+            bot_index = idx
+            break
+
+    message = (
+        f"🤖 你好！我是 Bot **#{bot_index}**。"
+        f"\n(我的 Token 尾号是: `{bot_token_end}`)"
+        "\n\n请发送消息给我，我会复读你的内容！"
+        "\n你可以使用 /help 查看可用命令。"
+    )
+    await update.message.reply_html(message)
+
+# /help 命令
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """回复 /help 命令。"""
+    message = (
+        "📚 **可用命令:**\n"
+        "/start - 启动 Bot 并获取 Bot ID\n"
+        "/help - 显示此帮助信息\n"
+        "\n任何其他消息将作为文本复读。"
+    )
+    await update.message.reply_html(message)
+
+# 消息处理函数（复读功能）
+async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """复读用户发送的文本消息。"""
+    if update.message and update.message.text:
+        text = update.message.text
+        logger.info(f"Bot {context.application.bot.token[-4:]} 收到消息: {text[:50]}...")
+        await update.message.reply_text(f"你说了: \n\n{text}")
+
+# --- 5. Bot 启动与停止逻辑 ---
+
+def setup_bot(app_instance: Application, bot_index: int) -> None:
+    """配置 Bot 的所有处理器 (Handlers)。"""
+    
+    # 打印 Bot 正在配置的诊断信息
+    token_end = app_instance.bot.token[-4:]
+    logger.info(f"Bot Application 实例 (#{bot_index}, 尾号: {token_end}) 正在配置 Handlers。")
+
+    # 添加 Handlers
+    app_instance.add_handler(CommandHandler("start", start_command))
+    app_instance.add_handler(CommandHandler("help", help_command))
+    
+    # 过滤掉命令，只处理普通文本消息
+    app_instance.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_message))
+
+    
+async def start_bots():
+    """初始化所有 Bot 应用并启动它们。"""
+    
+    # 1. 查找环境变量中的 Bot Token
+    token_list = []
+    for i in range(1, 10): # 检查 BOT_TOKEN_1 到 BOT_TOKEN_9
+        token_name = f"BOT_TOKEN_{i}"
+        token_value = os.getenv(token_name)
+        if token_value:
+            # 记录诊断信息
+            logger.info(f"DIAGNOSTIC: 发现环境变量 {token_name}。Token 尾号: {token_value[-4:]}")
+            token_list.append(token_value)
         else:
-            # 诊断信息显示未找到 Token (这应该只发生在未设置的 BOT_TOKEN_2, BOT_TOKEN_3, BOT_TOKEN_5, etc.)
-            logger.info(f"DIAGNOSTIC: 环境变量 {token_key} 未设置。")
+            logger.info(f"DIAGNOSTIC: 环境变量 {token_name} 未设置。")
 
-    if tokens_found == 0:
-        logger.error("❌ 未找到任何有效的 Bot Token。")
-    else:
-        logger.info(f"✅ 成功加载 {tokens_found} 个 Bot Token。")
-        
-    return config
-
-async def init_telegram_applications(bot_configs: Dict[str, Any]):
-    """初始化并启动所有 Telegram 应用。"""
-    if not bot_configs:
+    if not token_list:
+        logger.error("❌ 未找到任何有效的 Bot Token。请检查环境变量 BOT_TOKEN_N 的设置。")
         return
 
-    # 从 Render 环境变量获取服务的外部 URL
-    external_url = os.environ.get("EXTERNAL_URL") 
+    logger.info(f"✅ 成功找到 {len(token_list)} 个 Bot Token。开始初始化...")
     
-    # 如果 Render 没有自动设置 EXTERNAL_URL，则假定它在运行时提供
-    if not external_url:
-        logger.warning("EXTERNAL_URL 环境变量未设置，可能无法正确设置 Webhook。")
-        # 尝试使用 Render 的 SERVICE_URL 变量 (如果存在)
-        external_url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("RENDER_SERVICE_URL")
-
-    for bot_id, cfg in bot_configs.items():
-        token = cfg["token"]
-        url_path = cfg["url_path"]
-        api_url = cfg.get("api_url")
-        
-        # 1. 创建 Application
-        application = ApplicationBuilder().token(token).build()
-        applications[bot_id] = application
-        bot_url_paths[bot_id] = url_path
-
-        # 2. 设置 Bot 的逻辑 (Handlers)
-        setup_function = BOT_SETUPS.get(bot_id)
-        if setup_function:
-            setup_function(application)
-        
-        # 3. 配置 Webhook
-        if external_url:
-            full_webhook_url = f"{external_url.rstrip('/')}{url_path}"
-            logger.info(f"Bot {bot_id} (Token {token[:5]}...): 正在设置 Webhook 到 {full_webhook_url}")
+    # 2. 创建并配置 Application 实例
+    for idx, token in enumerate(token_list, 1):
+        try:
+            # 创建 Application 实例
+            application = Application.builder().token(token).build()
             
-            # 使用 set_webhook 设置 Webhook URL
-            try:
-                await application.bot.set_webhook(url=full_webhook_url)
-                logger.info(f"Bot {bot_id}: Webhook 设置成功。")
-            except Exception as e:
-                logger.error(f"Bot {bot_id}: 设置 Webhook 失败: {e}")
+            # 配置 Handlers (使用通用的 setup_bot 函数)
+            setup_bot(application, idx)
+            
+            # 将实例添加到全局列表
+            BOT_APPLICATIONS.append(application)
+            
+            logger.info(f"Bot Application 实例已为 Token (尾号: {token[-4:]}) 创建。分配 Bot ID: #{idx}")
+            
+        except Exception as e:
+            logger.error(f"初始化 Bot Application 失败 (Token 尾号: {token[-4:]})：{e}")
 
-            if api_url:
-                 # 这是一个可选步骤，用于设置自定义 API URL，以防万一
-                 await application.bot.set_api_url(api_url)
 
-
-# --- 生命周期事件处理 (FastAPI) ---
+# --- 6. FastAPI 生命周期钩子 (Lifespan Hooks) ---
 
 @app.on_event("startup")
-async def startup_event():
-    """应用启动时，初始化所有 Bot 并启动后台轮询。"""
+async def on_startup():
+    """FastAPI 启动时执行 Bot 逻辑。"""
+    logger.info("应用启动中... 正在启动 Bot Applications 的后台任务。")
+    # 启动所有 Bot
+    await start_bots()
     
-    # 1. 加载配置
-    bot_configs = load_config()
-    
-    # 2. 初始化 Telegram 应用 (设置 Webhook URL)
-    await init_telegram_applications(bot_configs)
-    
-    logger.info("🎉 核心服务启动完成。")
+    # 启动所有 Bot 的 Long Polling
+    if BOT_APPLICATIONS:
+        # 在后台以非阻塞方式启动所有 Bot 的轮询
+        for app_instance in BOT_APPLICATIONS:
+            asyncio.create_task(app_instance.run_polling(drop_pending_updates=True, stop_on_shutdown=True))
+        logger.info("🎉 核心服务启动完成。所有 Bot 已开始轮询。")
+    else:
+        logger.warning("服务启动完成，但没有 Bot 运行。")
+
 
 @app.on_event("shutdown")
-async def shutdown_event():
-    """应用关闭时，停止所有后台任务。"""
+async def on_shutdown():
+    """FastAPI 关闭时停止 Bot 逻辑。"""
     logger.info("应用关闭中... 正在停止 Bot Applications 的后台任务。")
-    # 清理所有 Applications 的 Webhook
-    for bot_id, application in applications.items():
+    
+    # 优雅地停止所有 Bot 的轮询
+    for app_instance in BOT_APPLICATIONS:
         try:
-            await application.bot.delete_webhook()
-            logger.info(f"Bot {bot_id}: Webhook 已删除。")
+            await app_instance.shutdown()
         except Exception as e:
-            logger.error(f"Bot {bot_id}: 删除 Webhook 失败: {e}")
-
+            logger.error(f"Bot Application 关闭失败 (Token 尾号: {app_instance.bot.token[-4:]})：{e}")
+            
     logger.info("应用关闭完成。")
 
 
-# --- FastAPI Webhook 路由 ---
-
+# --- 7. 健康检查路由 ---
+# 这是一个必要的路由，确保 Render 知道应用正在运行
 @app.get("/")
-def home():
-    """根路径，用于健康检查和显示服务信息。"""
-    return {"status": "ok", "message": f"Telegram Bot Webhook Service Running with {len(applications)} Bots."}
+async def root():
+    """健康检查路由，返回 Bot 状态信息。"""
+    status = {
+        "status": "OK",
+        "message": "Telegram Multi-Bot service is running.",
+        "active_bots": len(BOT_APPLICATIONS),
+        "bot_tokens_found": [app.bot.token[-4:] for app in BOT_APPLICATIONS]
+    }
+    return status
 
-# 动态创建 Webhook 路由
-for bot_id in BOT_SETUPS.keys():
-    path = f"/webhook/bot{bot_id}"
-    
-    # 使用函数工厂模式来捕获 bot_id
-    def create_webhook_handler(current_bot_id):
-        async def webhook_handler(request: Request):
-            try:
-                # 获取对应的 Application 实例
-                application = applications.get(current_bot_id)
-                if not application:
-                    logger.warning(f"Webhook received for unknown bot ID: {current_bot_id}")
-                    return {"status": "error", "message": "Unknown bot ID"}
-
-                # 从请求中解析 JSON 数据
-                update_data = await request.json()
-                update = Update.de_json(update_data, application.bot)
-
-                # 将 Update 放入处理队列并异步处理
-                await application.process_update(update)
-
-                return {"status": "ok"}
-            except Exception as e:
-                logger.error(f"Error handling webhook for bot {current_bot_id}: {e}")
-                return {"status": "error", "message": str(e)}
-        
-        # 给函数指定一个唯一的名称，避免 FastAPI 路由冲突
-        webhook_handler.__name__ = f"webhook_handler_bot{current_bot_id}"
-        return webhook_handler
-
-    # 将动态生成的处理器添加到 FastAPI 路由
-    app.post(path)(create_webhook_handler(bot_id))
-    logger.info(f"Registered FastAPI route: POST {path}")
-
-
-if __name__ == "__main__":
-    # 仅用于本地测试
-    try:
-        uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
-    except KeyboardInterrupt:
-        pass
+# --- End of main.py ---
