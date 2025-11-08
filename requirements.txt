@@ -1,4 +1,5 @@
 fastapi
+uvicorn[standard]
 python-telegram-bot
-uvicorn
-gunicorn
+requests
+playwright
