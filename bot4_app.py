@@ -1,86 +1,57 @@
-from fastapi import APIRouter, HTTPException
-from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler
-import logging
 import os
+import logging
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from fastapi import APIRouter, Request, status
+from fastapi.responses import JSONResponse
 
-# 导入核心逻辑文件中的函数
-from link_generation_logic import generate_short_link
-
-# 配置日志，用于区分是哪个 Bot 实例在运行
 logger = logging.getLogger(__name__)
+# 从环境中获取 Bot 4 的 Token
+BOT_TOKEN = os.environ.get("BOT_TOKEN_4")
 
-# --- 1. 创建 APIRouter 实例并定义 Bot ---
+# --- Application 实例创建 ---
+# 仅创建实例，不调用 initialize()，initialize() 由 main.py 的 lifespan 负责调用
+application = Application.builder().token(BOT_TOKEN).build()
+
+# --- 路由 ---
 router = APIRouter()
-# Bot 4 的令牌环境变量
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN_4")
 
-# 初始化 Bot 和 Application
-if BOT_TOKEN:
-    bot = Bot(token=BOT_TOKEN)
-    # 使用并发更新来处理多个 Bot 的请求
-    application = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
-else:
-    logger.warning("Bot 4 (短链接生成) Token 未配置 (TELEGRAM_BOT_TOKEN_4)。请设置环境变量。")
+# --- Handlers ---
+async def start(update: Update, context):
+    """处理 /start 命令"""
+    await update.message.reply_text('Hello! I am Bot 4. I am running successfully!')
 
+async def echo(update: Update, context):
+    """回应用户发送的消息"""
+    if update.message:
+        await update.message.reply_text(f"Bot 4 收到消息: {update.message.text}")
 
-# --- Bot Command Handlers ---
-
-async def start_handler(update: Update, context):
-    """处理 /start 命令，提供帮助信息。"""
-    help_text = "欢迎使用 4 号短链接生成 Bot！\n"
-    help_text += "功能：从 API 获取域名 A，并在域名 B 上生成一个短链接。\n"
-    help_text += "使用方法：\n"
-    help_text += "1. 自动生成代码：`/link`\n"
-    help_text += "2. 自定义代码 (3-8 位字母数字)：`/link <自定义代码>`\n"
-    help_text += "示例：`/link MyCode123`"
-    await update.message.reply_text(help_text)
-
-async def link_command_handler(update: Update, context):
-    """处理 /link 命令，调用核心短链接生成逻辑。"""
-    
-    # 提取自定义代码，如果没有则为 None
-    custom_code = context.args[0] if context.args else None
-    
-    await update.message.reply_text("Bot 4 正在为您生成短链接，请稍候...")
-    
-    # 调用核心逻辑 (来自 link_generation_logic.py)
-    result = await generate_short_link(custom_code)
-    
-    await update.message.reply_text(result)
+# 注册 Handlers
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
 
-# --- 添加 Handler 到 Application ---
-if BOT_TOKEN:
-    application.add_handler(CommandHandler("start", start_handler))
-    application.add_handler(CommandHandler("link", link_command_handler))
-
-
-# --- 2. Webhook 路由函数 ---
-
-async def handle_webhook(update_data: dict):
-    """处理传入的 Telegram Webhook JSON 数据。"""
-    if not BOT_TOKEN:
-        return {"status": "error", "message": "Bot token not configured."}
-        
-    try:
-        update = Update.de_json(update_data, bot)
-        await application.process_update(update)
-        return {"status": "ok"}
-        
-    except Exception as e:
-        logger.error(f"Bot 4 处理 Webhook 错误: {e}", exc_info=True)
-        return {"status": "error", "message": str(e)}
-
-
-# --- 3. 挂载到 APIRouter ---
+# --- Webhook 路由定义 ---
 @router.post("/webhook")
-async def webhook_handler(update_data: dict):
-    """接收 Telegram Webhook POST 请求。"""
-    if not BOT_TOKEN:
-        raise HTTPException(status_code=500, detail="Bot 4 Token 未配置。")
+async def telegram_webhook(request: Request):
+    """
+    处理传入的 Telegram Webhook 更新。
+    路径 '/webhook' 会被 main.py 挂载在 /bot/{TOKEN}/ 之下。
+    """
+    try:
+        # 获取 JSON 数据
+        data = await request.json()
         
-    response = await handle_webhook(update_data)
-    
-    # 始终返回 200 OK，通知 Telegram 接收成功
-    return response
+        # 将 JSON 数据转换为 Telegram Update 对象
+        update = Update.de_json(data, application.bot)
+        
+        # 将 Update 放入 Application 的更新队列中
+        await application.update_queue.put(update)
+        
+        # 立即返回 200 OK，表示接收成功
+        return JSONResponse(content={"status": "ok"}, status_code=status.HTTP_200_OK)
+
+    except Exception as e:
+        logger.error(f"Bot 4 处理 Webhook 更新时发生错误: {e}")
+        # 即使出错也返回 200，防止 Telegram 频繁重试
+        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=status.HTTP_200_OK)
