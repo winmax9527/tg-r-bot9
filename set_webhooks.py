@@ -12,7 +12,6 @@ BASE_URL = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 # 如果没有找到公共 URL，脚本将无法运行
 if not BASE_URL:
     logging.error("无法获取 BASE_URL。请确保在 PaaS 环境中运行此脚本，或者手动设置 PUBLIC_URL 环境变量。")
-    # 如果本地测试，可以手动设置 PUBLIC_URL，例如：BASE_URL = "https://your-ngrok-url.ngrok.io"
     sys.exit(1)
 
 # 强制使用 HTTPS
@@ -20,7 +19,6 @@ BASE_URL = f"https://{BASE_URL}"
 logging.info(f"检测到的公共服务 URL (BASE_URL): {BASE_URL}")
 
 # 定义需要处理的 Bot ID 列表
-# 确保这里的 ID (1, 4, 6, 9) 与您的应用程序文件 botX_app.py 匹配
 BOT_IDS = [1, 4, 6, 9]
 
 def set_webhook_and_check(bot_id: int, base_url: str):
@@ -34,15 +32,15 @@ def set_webhook_and_check(bot_id: int, base_url: str):
         logging.warning(f"跳过 Bot {bot_id}：环境变量 {token_env_name} 未设置。")
         return False
     
-    # 2. 定义 Webhook URL
-    # Webhook URL 格式: https://<您的域名>/bot/<Bot ID>/webhook
-    webhook_url = f"{base_url}/bot/{bot_id}/webhook"
+    # 2. ***关键修正***：Webhook URL 必须使用完整的 Bot Token，因为这是 main.py 挂载的路由。
+    # 挂载路由示例: /bot/8581188998:AAFyKtDqpy6RYCKNXo_rfzqbke9kydynwGg
+    # 注意：我们去掉了 '/webhook' 后缀，并使用 {bot_token} 替换了 {bot_id}
+    webhook_url = f"{base_url}/bot/{bot_token}" 
     
     # 3. 设置 Webhook
     set_url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
     set_payload = {
         'url': webhook_url,
-        # 允许最大 100 个未决更新，提高容错能力
         'max_connections': 100, 
     }
     
