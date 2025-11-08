@@ -1,110 +1,158 @@
 import logging
-import asyncio
+import re
 from playwright.async_api import async_playwright
-import httpx # 确保 httpx 已经安装
+from telegram import Update
+from telegram.ext import ContextTypes, Application
+from datetime import datetime, timedelta
 
-# --- 日志配置 ---
+# 配置日志
 logger = logging.getLogger(__name__)
 
-async def resolve_url_logic(api_url: str, bot_id: str) -> tuple[str | None, str]:
-    """
-    使用 Playwright 访问 API URL，抓取最新下载链接，并返回结果。
-    
-    Args:
-        api_url: 机器人需要访问的最新地址 API (域名 A)。
-        bot_id: 当前机器人的 ID (用于日志)。
+# 定义一个简单的内存缓存，用于存储生成的短链结果，避免重复抓取
+# 结构: { (bot_id, link_type): (result_text, expiry_time) }
+link_cache = {}
+CACHE_LIFETIME_MINUTES = 10
 
-    Returns:
-        (final_url, reply_message)
-    """
+def _extract_link_type(text: str) -> str:
+    """从用户消息中提取链接类型（如：安卓, 苹果, 最新, 默认）"""
+    text_lower = text.lower()
     
-    final_url = None
-    reply_message = ""
+    # 定义匹配模式和对应的类型
+    if '安卓' in text_lower or 'android' in text_lower:
+        return 'android'
+    elif '苹果' in text_lower or 'ios' in text_lower:
+        return 'ios'
+    elif '最新' in text_lower:
+        return 'latest'
+    else:
+        return 'default' # 默认地址或链接
 
-    # 使用 asyncio.wait_for 确保 Playwright 操作不会无限期挂起
+async def _fetch_links_from_api_url(api_url: str) -> str | None:
+    """使用 Playwright 访问 API_URL，并尝试抓取所有链接作为内容"""
     try:
+        # 使用 Chromium 启动 Playwright
         async with async_playwright() as p:
-            # 在 Render 上，必须使用 headless=True 运行浏览器
+            # 启动一个无头浏览器实例
             browser = await p.chromium.launch(headless=True)
+            # 创建一个新页面
             page = await browser.new_page()
 
-            logger.info(f"Bot {bot_id}: Navigating to API URL (Domain A): {api_url}")
+            logger.info(f"Playwright 正在访问目标 URL: {api_url}")
             
-            # 访问 API 页面，超时设为 15 秒
-            # Playwright 会处理 JS 跳转
-            await page.goto(api_url, timeout=15000, wait_until="networkidle")
+            # 导航到目标 URL，等待网络空闲 (networkidle)，提高抓取成功率
+            response = await page.goto(api_url, wait_until="networkidle")
+            
+            if response and response.status != 200:
+                logger.error(f"访问 URL 失败，HTTP 状态码: {response.status}")
+                await browser.close()
+                return None
 
-            # 假设页面执行 JS 后，跳转到了最终链接 (域名 B)
-            # 我们直接获取跳转后的当前 URL
-            
-            # 等待 2 秒，给 JS 充足的跳转时间
-            await asyncio.sleep(2) 
-            
-            # 获取最终跳转后的 URL
-            current_url = page.url
-            
-            # 如果 URL 与初始 API URL 不同，则认为是成功跳转
-            if current_url != api_url:
-                final_url = current_url
-            else:
-                # 如果没有跳转，可能需要从页面内容中解析链接 (这是最复杂的部分)
-                # 假设您的 API 域名 A 直接返回了 JSON 而不是 HTML (这是我们上一轮讨论的复杂情况)
-                
-                # --- 更正：Playwright 处理的是 HTML 页面，如果返回 JSON，需要用 httpx ---
-                
-                # 为了简化并遵守您的“域名 A (JSON) -> 域名 B (JS)”逻辑，
-                # 我们假设 API_URL (域名 A) 返回一个 JSON 字符串，其中包含一个 JS 跳转页的URL。
-                
-                # 步骤 1: 使用 httpx 获取 API (域名 A) 返回的 JSON 数据
-                async with httpx.AsyncClient(timeout=10) as client:
-                    response = await client.get(api_url)
-                    response.raise_for_status() # 如果请求失败则抛出异常
-                    data = response.json()
-                    
-                    # !!! 假设 JSON 结构为 {"redirect_url": "跳转URL"} !!!
-                    # !!! 请根据您的实际 JSON 结构修改这里的键名 !!!
-                    intermediate_url = data.get("redirect_url")
-                    
-                    if not intermediate_url:
-                         reply_message = f"❌ API (域名 A) 响应成功，但 JSON 中未找到 'redirect_url' 键。"
-                         await browser.close()
-                         return final_url, reply_message
+            # 等待 3 秒，确保所有动态内容加载完成
+            await page.wait_for_timeout(3000)
 
-                    logger.info(f"Bot {bot_id}: JSON received. Intermediate URL: {intermediate_url}")
+            # --- 核心抓取逻辑 ---
+            # 1. 抓取页面上的所有链接 (href 属性)
+            links = await page.evaluate('''() => {
+                const anchors = Array.from(document.querySelectorAll('a'));
+                return anchors.map(a => a.href).filter(href => href && href !== '#');
+            }''')
 
-                    # 步骤 2: 使用 Playwright 访问中间页并等待 JS 跳转
-                    await page.goto(intermediate_url, timeout=15000, wait_until="networkidle")
-                    
-                    # 等待 JS 跳转完成
-                    await asyncio.sleep(3) 
-                    
-                    final_url = page.url
-                    
-                    if final_url == intermediate_url:
-                         reply_message = f"⚠️ 页面未发生 JS 跳转。请访问：{intermediate_url}"
-                         final_url = None
-                    
-                
-            # 关闭浏览器
+            # 2. 抓取页面上的所有可见文本 (作为上下文，防止页面只展示链接)
+            all_text = await page.locator('body').inner_text()
+            
             await browser.close()
 
-    except TimeoutError:
-        logger.error(f"Bot {bot_id}: Playwright operation timed out.")
-        reply_message = f"❌ 机器人连接超时。API 或跳转页面响应慢。请稍后再试或访问：{api_url}"
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Bot {bot_id}: HTTP Status Error: {e}")
-        reply_message = f"❌ API (域名 A) 访问失败，状态码: {e.response.status_code}。"
-    except Exception as e:
-        logger.error(f"Bot {bot_id}: 核心逻辑发生未知错误: {e}")
-        reply_message = f"❌ 机器人运行时发生未知错误：{e}. 请联系管理员。"
-    
-    
-    # 构造最终回复
-    if final_url:
-        reply_message = f"🎉 **Bot {bot_id} 找到最新链接！**\n\n"
-        reply_message += f"🔗 最新下载地址: {final_url}\n\n"
-        reply_message += f"➡️ 备用访问地址: {api_url}"
-    elif not reply_message:
-        reply_message = "❌ 机器人未能找到最新链接，但未发生崩溃。请检查 API 配置或手动访问。"
+            # 整理结果文本
+            result_text = "--- 页面链接信息 ---\n"
+            
+            if all_text.strip():
+                # 提取重要的文本内容，例如去除多余空白行
+                result_text += "抓取的关键文本:\n"
+                key_text = '\n'.join(
+                    line.strip() for line in all_text.split('\n') if line.strip()
+                )[:1000] # 限制长度，避免过长
+                result_text += key_text + "\n"
 
-    return final_url, reply_message
+            if links:
+                result_text += "\n抓取到的所有有效链接:\n"
+                # 对链接进行去重和排序
+                unique_links = sorted(list(set(links)))
+                result_text += '\n'.join(unique_links)
+            
+            if not all_text.strip() and not links:
+                 return "未能从目标页面抓取到有效内容或链接。"
+                 
+            return result_text
+
+    except Exception as e:
+        logger.error(f"Playwright 抓取链接时发生错误: {e}")
+        return None
+
+
+def _format_link_response(fetch_result: str | None, bot_id: int, api_url: str) -> str:
+    """根据抓取结果格式化回复消息"""
+    if fetch_result:
+        # 成功抓取，返回抓取到的内容
+        return (
+            f"✅ Bot {bot_id} 最新地址/链接已抓取成功:\n\n"
+            f"{fetch_result}\n\n"
+            f"数据缓存 {CACHE_LIFETIME_MINUTES} 分钟，请稍后再试以获取更新。"
+        )
+    else:
+        # 抓取失败
+        return (
+            f"❌ Bot {bot_id} 抱歉，未能成功获取最新地址或链接。\n"
+            f"请检查目标网站 ({api_url}) 是否可访问，或稍后再试。"
+        )
+
+# --- Telegram Handler 函数 ---
+async def generate_short_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    处理用户发送的 '地址', '链接', '最新地址' 等消息，并回复抓取到的链接信息。
+    """
+    if not update.message:
+        return
+
+    chat_id = update.effective_chat.id
+    user_message = update.message.text
+    
+    # 从 bot_data 中获取配置信息
+    api_url = context.application.bot_data.get('API_URL')
+    bot_id = context.application.bot_data.get('BOT_ID')
+
+    if not api_url or not bot_id:
+        await update.message.reply_text("系统配置错误：缺少 API_URL 或 BOT_ID。")
+        return
+
+    # 1. 提取链接类型 (虽然目前逻辑不区分类型，但保留结构以备扩展)
+    link_type = _extract_link_type(user_message)
+    cache_key = (bot_id, link_type)
+    
+    logger.info(f"Bot {bot_id} 收到消息: '{user_message}' (类型: {link_type})")
+
+    # 2. 检查缓存
+    now = datetime.now()
+    if cache_key in link_cache:
+        result, expiry_time = link_cache[cache_key]
+        if now < expiry_time:
+            logger.info(f"Bot {bot_id} 命中缓存，直接回复。")
+            await update.message.reply_text(
+                f"ℹ️ Bot {bot_id} 链接 (缓存) 信息:\n\n{result}"
+            )
+            return
+
+    # 3. 抓取链接
+    await update.message.reply_text(f"⏳ Bot {bot_id} 正在访问目标网站 ({api_url})，请稍候...")
+    
+    fetch_result = await _fetch_links_from_api_url(api_url)
+    
+    # 4. 格式化回复
+    response_text = _format_link_response(fetch_result, bot_id, api_url)
+    
+    # 5. 更新缓存 (只有成功抓取到内容才缓存)
+    if fetch_result:
+        expiry_time = now + timedelta(minutes=CACHE_LIFETIME_MINUTES)
+        link_cache[cache_key] = (fetch_result, expiry_time)
+
+    # 6. 发送回复
+    await update.message.reply_text(response_text)
