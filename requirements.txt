@@ -1,0 +1,6 @@
+python-telegram-bot[webhooks]
+requests
+fastapi
+gunicorn
+uvicorn
+playwright
