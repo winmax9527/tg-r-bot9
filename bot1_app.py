@@ -1,86 +1,108 @@
-from fastapi import APIRouter, HTTPException
-from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler
-import logging
 import os
+import logging
+from telegram import Update
+from telegram.ext import Application, MessageHandler, filters
+from fastapi import APIRouter, Request
+import asyncio
+from link_generation_logic import resolve_url_logic # 导入核心逻辑
 
-# 导入核心逻辑文件中的函数
-from link_generation_logic import generate_short_link
+# --- 1. Bot 配置 ---
+BOT_ID = "1"
+BOT_TOKEN = os.environ.get(f"TELEGRAM_BOT_TOKEN_{BOT_ID}") 
+API_URL = os.environ.get(f"BOT_{BOT_ID}_API_URL") # 使用 BOT_1_API_URL 环境变量
+WEBHOOK_PATH = f"/bot{BOT_ID}/webhook"
 
-# 配置日志，用于区分是哪个 Bot 实例在运行
+# --- 2. 日志配置 ---
 logger = logging.getLogger(__name__)
 
-# --- 1. 创建 APIRouter 实例并定义 Bot ---
+# --- 3. Bot Core Logic ---
+async def get_final_url(update: Update, context) -> None:
+    """处理用户消息，调用核心逻辑并返回结果。"""
+    
+    # 立即发送回复，这是防止 Telegram 超时的关键
+    await update.message.reply_text("正在为您获取最新下载链接，请稍候...")
+    
+    if not API_URL:
+        await update.message.reply_text("❌ 机器人配置错误，未找到 API URL。")
+        logger.error(f"Bot {BOT_ID}: API_URL not found.")
+        return
+
+    # 调用核心逻辑
+    final_url, reply_message = await resolve_url_logic(API_URL, BOT_ID)
+    
+    # 发送最终结果
+    await update.message.reply_text(reply_message)
+
+
+# --- 4. 初始化 Telegram Application 实例 ---
+application = None
+# ⭐️ 新增：状态标志，用于确保 Bot 完全初始化
+bot_ready = asyncio.Event()
+
+async def initialize_bot(): 
+    """初始化 Bot 实例"""
+    global application
+    
+    if BOT_TOKEN and API_URL:
+        # 必须使用 Application.builder().token().build() 来创建实例
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # 定义需要响应的命令/关键词
+        COMMAND_PATTERN = r"^(地址|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接|/start_check|/start)$"
+        application.add_handler(
+            MessageHandler(
+                filters.TEXT & filters.Regex(COMMAND_PATTERN), 
+                get_final_url
+            )
+        )
+        
+        # 1. 启动 Bot 内部的异步任务，包括 initialize() 和 start()
+        await application.initialize()
+        asyncio.create_task(application.start()) 
+        
+        # 2. 标记 Bot 已准备就绪
+        bot_ready.set()
+        
+        logger.info(f"Initialized Bot {BOT_ID} on path {WEBHOOK_PATH}")
+    else:
+        logger.error(f"Bot {BOT_ID}: TOKEN or API_URL not set.")
+
+# --- 5. FastAPI 路由设置 ---
+# 必须使用 APIRouter
 router = APIRouter()
-# Bot 1 的令牌环境变量
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN_1")
 
-# 初始化 Bot 和 Application
-if BOT_TOKEN:
-    bot = Bot(token=BOT_TOKEN)
-    # 使用并发更新来处理多个 Bot 的请求
-    application = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
-else:
-    logger.warning("Bot 1 (短链接生成) Token 未配置 (TELEGRAM_BOT_TOKEN_1)。请设置环境变量。")
+@router.on_event("startup")
+async def startup_event():
+    """Bot 1 专属启动事件"""
+    await initialize_bot()
 
-
-# --- Bot Command Handlers ---
-
-async def start_handler(update: Update, context):
-    """处理 /start 命令，提供帮助信息。"""
-    help_text = "欢迎使用 1 号短链接生成 Bot！\n"
-    help_text += "功能：从 API 获取域名 A，并在域名 B 上生成一个短链接。\n"
-    help_text += "使用方法：\n"
-    help_text += "1. 自动生成代码：`/link`\n"
-    help_text += "2. 自定义代码 (3-8 位字母数字)：`/link <自定义代码>`\n"
-    help_text += "示例：`/link MyCode123`"
-    await update.message.reply_text(help_text)
-
-async def link_command_handler(update: Update, context):
-    """处理 /link 命令，调用核心短链接生成逻辑。"""
+@router.post(WEBHOOK_PATH)
+async def telegram_webhook(request: Request):
+    """处理来自 Telegram 的 Webhook 请求"""
+    # ⭐️ 关键修复：等待 Bot 准备就绪
+    await asyncio.wait_for(bot_ready.wait(), timeout=5) # 最多等待 5 秒
     
-    # 提取自定义代码，如果没有则为 None
-    custom_code = context.args[0] if context.args else None
-    
-    await update.message.reply_text("Bot 1 正在为您生成短链接，请稍候...")
-    
-    # 调用核心逻辑 (来自 link_generation_logic.py)
-    result = await generate_short_link(custom_code)
-    
-    await update.message.reply_text(result)
+    if not application:
+        logger.error(f"Bot {BOT_ID}: Application not initialized.")
+        return {"status": "error", "message": "Application not initialized"}
 
-
-# --- 添加 Handler 到 Application ---
-if BOT_TOKEN:
-    application.add_handler(CommandHandler("start", start_handler))
-    application.add_handler(CommandHandler("link", link_command_handler))
-
-
-# --- 2. Webhook 路由函数 ---
-
-async def handle_webhook(update_data: dict):
-    """处理传入的 Telegram Webhook JSON 数据。"""
-    if not BOT_TOKEN:
-        return {"status": "error", "message": "Bot token not configured."}
-        
     try:
-        update = Update.de_json(update_data, bot)
-        await application.process_update(update)
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        # 将 Update 对象放入 Bot 内部的异步队列中等待处理
+        await application.update_queue.put(update)
         return {"status": "ok"}
-        
+    except asyncio.TimeoutError:
+        # 如果等待超时，返回一个失败状态
+        logger.error(f"Bot {BOT_ID}: Initialization timeout. Cannot process webhook.")
+        return {"status": "error", "message": "Bot initialization timeout"}
     except Exception as e:
-        logger.error(f"Bot 1 处理 Webhook 错误: {e}", exc_info=True)
+        logger.error(f"Bot {BOT_ID}: Error processing update: {e}")
         return {"status": "error", "message": str(e)}
 
-
-# --- 3. 挂载到 APIRouter ---
-@router.post("/webhook")
-async def webhook_handler(update_data: dict):
-    """接收 Telegram Webhook POST 请求。"""
-    if not BOT_TOKEN:
-        raise HTTPException(status_code=500, detail="Bot 1 Token 未配置。")
-        
-    response = await handle_webhook(update_data)
-    
-    # 始终返回 200 OK，通知 Telegram 接收成功
-    return response
+# --- 6. 额外：健康检查 (可选) ---
+@router.get("/")
+def health_check():
+    # 也可以检查 bot_ready.is_set() 来提供更详细的状态
+    status = "ready" if bot_ready.is_set() else "initializing"
+    return {"status": status, "message": f"Bot {BOT_ID} Router is {status}."}
