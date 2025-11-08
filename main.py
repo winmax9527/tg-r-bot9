@@ -1,33 +1,28 @@
 import os
 import logging
 import asyncio
-from typing import List, Tuple, Callable, Awaitable
+from typing import List, AsyncGenerator
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # --- 1. 配置日志记录 (Logging Setup) ---
-# 设置 Python 日志格式，确保日志信息清晰
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- 2. FastAPI 应用实例 ---
-# Gunicorn worker 将加载此应用实例
-app = FastAPI(title="Multi-Bot Telegram Handler")
-
-# --- 3. 全局状态和数据结构 ---
+# --- 2. 全局状态和数据结构 ---
 # 存储所有 Bot Application 实例
 BOT_APPLICATIONS: List[Application] = []
 
-# --- 4. Bot 核心命令处理函数 (Handlers) ---
+# --- 3. Bot 核心命令处理函数 (Handlers) ---
 
 # /start 命令
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """回复 /start 命令，并显示当前 Bot ID。"""
-    # 从 context.application.bot.token 获取当前 Bot 的 Token
     bot_token_end = context.application.bot.token[-4:]
     
     # 尝试查找 BOT_APPLICATIONS 列表，看它是第几个 Bot
@@ -43,7 +38,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "\n\n请发送消息给我，我会复读你的内容！"
         "\n你可以使用 /help 查看可用命令。"
     )
-    # 使用 reply_html 发送消息
     await update.message.reply_html(message)
 
 # /help 命令
@@ -55,7 +49,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/help - 显示此帮助信息\n"
         "\n任何其他消息将作为文本复读。"
     )
-    # 使用 reply_html 发送消息
     await update.message.reply_html(message)
 
 # 消息处理函数（复读功能）
@@ -63,30 +56,28 @@ async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """复读用户发送的文本消息。"""
     if update.message and update.message.text:
         text = update.message.text
-        # 记录 Bot Token 的末尾四位进行诊断
         logger.info(f"Bot {context.application.bot.token[-4:]} 收到消息: {text[:50]}...")
         await update.message.reply_text(f"你说了: \n\n{text}")
 
-# --- 5. Bot 启动与停止逻辑 ---
+# --- 4. Bot 启动与停止逻辑 ---
 
 def setup_bot(app_instance: Application, bot_index: int) -> None:
     """配置 Bot 的所有处理器 (Handlers)。"""
     
-    # 打印 Bot 正在配置的诊断信息
     token_end = app_instance.bot.token[-4:]
     logger.info(f"Bot Application 实例 (#{bot_index}, 尾号: {token_end}) 正在配置 Handlers。")
 
-    # 添加 Handlers
     app_instance.add_handler(CommandHandler("start", start_command))
     app_instance.add_handler(CommandHandler("help", help_command))
-    
-    # 过滤掉命令，只处理普通文本消息
     app_instance.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_message))
 
     
 async def start_bots():
     """初始化所有 Bot 应用并启动它们。"""
     
+    global BOT_APPLICATIONS
+    BOT_APPLICATIONS = [] # 确保每次启动时清空列表
+
     # 1. 查找环境变量中的 Bot Token
     token_list = []
     # 检查 BOT_TOKEN_1 到 BOT_TOKEN_9
@@ -94,7 +85,6 @@ async def start_bots():
         token_name = f"BOT_TOKEN_{i}"
         token_value = os.getenv(token_name)
         if token_value:
-            # 记录诊断信息
             logger.info(f"DIAGNOSTIC: 发现环境变量 {token_name}。Token 尾号: {token_value[-4:]}")
             token_list.append(token_value)
         else:
@@ -123,14 +113,17 @@ async def start_bots():
         except Exception as e:
             logger.error(f"初始化 Bot Application 失败 (Token 尾号: {token[-4:]})：{e}")
 
+# --- 5. FastAPI Lifespan 上下文管理器 (Replacement for on_event) ---
 
-# --- 6. FastAPI 生命周期钩子 (Lifespan Hooks) ---
-
-@app.on_event("startup")
-async def on_startup():
-    """FastAPI 启动时执行 Bot 逻辑。"""
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """
+    FastAPI 生命周期管理器：
+    在应用启动时启动 Bot 轮询，在应用关闭时停止 Bot 轮询。
+    """
+    
+    # 启动阶段 (Startup)
     logger.info("应用启动中... 正在启动 Bot Applications 的后台任务。")
-    # 启动所有 Bot
     await start_bots()
     
     # 启动所有 Bot 的 Long Polling
@@ -138,15 +131,16 @@ async def on_startup():
         # 在后台以非阻塞方式启动所有 Bot 的轮询
         for app_instance in BOT_APPLICATIONS:
             # 使用 asyncio.create_task 在后台启动轮询
+            # 注意: run_polling 是一个阻塞调用，必须在 task 中运行
             asyncio.create_task(app_instance.run_polling(drop_pending_updates=True, stop_on_shutdown=True))
         logger.info("🎉 核心服务启动完成。所有 Bot 已开始轮询。")
     else:
         logger.warning("服务启动完成，但没有 Bot 运行。")
 
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    """FastAPI 关闭时停止 Bot 逻辑。"""
+    # FastAPI Yield: 此时应用开始接受请求
+    yield
+    
+    # 关闭阶段 (Shutdown)
     logger.info("应用关闭中... 正在停止 Bot Applications 的后台任务。")
     
     # 优雅地停止所有 Bot 的轮询
@@ -160,8 +154,12 @@ async def on_shutdown():
     logger.info("应用关闭完成。")
 
 
+# --- 6. FastAPI 应用实例 (使用 lifespan 钩子) ---
+# Gunicorn worker 将加载此应用实例
+app = FastAPI(title="Multi-Bot Telegram Handler", lifespan=lifespan)
+
+
 # --- 7. 健康检查路由 ---
-# 这是一个必要的路由，确保 web 容器知道应用正在运行
 @app.get("/")
 async def root():
     """健康检查路由，返回 Bot 状态信息。"""
@@ -172,5 +170,3 @@ async def root():
         "bot_tokens_found": [app.bot.token[-4:] for app in BOT_APPLICATIONS]
     }
     return status
-
-# --- End of main.py ---
