@@ -1,9 +1,8 @@
 import os
 import logging
 import asyncio
-from typing import List, AsyncGenerator
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from typing import List, Dict
+from fastapi import FastAPI, Request, Response
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -15,8 +14,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- 2. 全局状态和数据结构 ---
-# 存储所有 Bot Application 实例
-BOT_APPLICATIONS: List[Application] = []
+# 存储所有 Bot Application 实例，用 Token 尾号作为索引
+BOT_APPLICATIONS: Dict[str, Application] = {}
+# 存储 Token 和它们对应的 Webhook 路径
+BOT_WEBHOOK_PATHS: Dict[str, str] = {}
 
 # --- 3. Bot 核心命令处理函数 (Handlers) ---
 
@@ -25,20 +26,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """回复 /start 命令，并显示当前 Bot ID。"""
     bot_token_end = context.application.bot.token[-4:]
     
-    # 尝试查找 BOT_APPLICATIONS 列表，看它是第几个 Bot
-    bot_index = -1
-    for idx, app_instance in enumerate(BOT_APPLICATIONS, 1):
-        if app_instance.bot.token == context.application.bot.token:
-            bot_index = idx
+    # 尝试查找 Bot ID
+    bot_index = "N/A"
+    for path, app in BOT_APPLICATIONS.items():
+        if app.bot.token == context.application.bot.token:
+            bot_index = path.replace("bot", "").replace("_webhook", "") # e.g., "1", "4"
             break
 
     message = (
-        f"🤖 你好！我是 Bot **#{bot_index}**。"
-        f"\n(我的 Token 尾号是: `{bot_token_end}`)"
-        "\n\n请发送消息给我，我会复读你的内容！"
-        "\n你可以使用 /help 查看可用命令。"
+        f"🤖 你好！我是 Bot **#{bot_index}**。\n"
+        f"(我的 Token 尾号是: `{bot_token_end}`)\n\n"
+        "请发送消息给我，我会复读你的内容！\n"
+        "你可以使用 /help 查看可用命令。"
     )
-    # 使用 reply_html 可以在 Telegram 中渲染 Markdown 或 HTML 格式
     await update.message.reply_html(message)
 
 # /help 命令
@@ -47,8 +47,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     message = (
         "📚 **可用命令:**\n"
         "/start - 启动 Bot 并获取 Bot ID\n"
-        "/help - 显示此帮助信息\n"
-        "\n任何其他消息将作为文本复读。"
+        "/help - 显示此帮助信息\n\n"
+        "任何其他消息将作为文本复读。"
     )
     await update.message.reply_html(message)
 
@@ -60,11 +60,8 @@ async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.info(f"Bot {context.application.bot.token[-4:]} 收到消息: {text[:50]}...")
         await update.message.reply_text(f"你说了: \n\n{text}")
 
-# --- 4. Bot 启动与停止逻辑 ---
-
 def setup_bot(app_instance: Application, bot_index: int) -> None:
     """配置 Bot 的所有处理器 (Handlers)。"""
-    
     token_end = app_instance.bot.token[-4:]
     logger.info(f"Bot Application 实例 (#{bot_index}, 尾号: {token_end}) 正在配置 Handlers。")
 
@@ -72,101 +69,96 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
     app_instance.add_handler(CommandHandler("help", help_command))
     app_instance.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_message))
 
-    
-async def start_bots():
-    """初始化所有 Bot 应用并启动它们。"""
-    
-    global BOT_APPLICATIONS
-    BOT_APPLICATIONS = [] # 确保每次启动时清空列表
+# --- 4. FastAPI 应用实例 ---
+app = FastAPI(title="Multi-Bot Telegram Webhook Handler")
 
-    # 1. 查找环境变量中的 Bot Token
-    token_list = []
-    # 检查 BOT_TOKEN_1 到 BOT_TOKEN_9
-    for i in range(1, 10): 
+# --- 5. 应用启动时，初始化所有 Bot ---
+@app.on_event("startup")
+async def startup_event():
+    """在 FastAPI 启动时初始化所有 Bot Application 实例。"""
+    
+    global BOT_APPLICATIONS, BOT_WEBHOOK_PATHS
+    BOT_APPLICATIONS = {}
+    BOT_WEBHOOK_PATHS = {}
+
+    logger.info("应用启动中... 正在查找 Bot Token 并创建 Application 实例。")
+
+    # 查找环境变量中的 Bot Token (1, 4, 6, 9 等)
+    for i in range(1, 10): # 检查 BOT_TOKEN_1 到 BOT_TOKEN_9
         token_name = f"BOT_TOKEN_{i}"
         token_value = os.getenv(token_name)
+        
         if token_value:
             logger.info(f"DIAGNOSTIC: 发现环境变量 {token_name}。Token 尾号: {token_value[-4:]}")
-            token_list.append(token_value)
+            
+            # 创建 Application 实例
+            application = Application.builder().token(token_value).build()
+            
+            # 配置 Handlers (复读机功能)
+            setup_bot(application, i)
+            
+            # 定义此 Bot 的 Webhook 路径
+            webhook_path = f"bot{i}_webhook"
+            
+            # 存储实例和路径
+            BOT_APPLICATIONS[webhook_path] = application
+            BOT_WEBHOOK_PATHS[token_value] = webhook_path
+            
+            logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已创建。监听路径: /{webhook_path}")
+            
         else:
             logger.info(f"DIAGNOSTIC: 环境变量 {token_name} 未设置。")
 
-    if not token_list:
+    if not BOT_APPLICATIONS:
         logger.error("❌ 未找到任何有效的 Bot Token。请检查环境变量 BOT_TOKEN_N 的设置。")
-        return
-
-    logger.info(f"✅ 成功找到 {len(token_list)} 个 Bot Token。开始初始化...")
-    
-    # 2. 创建并配置 Application 实例
-    for idx, token in enumerate(token_list, 1):
-        try:
-            # 创建 Application 实例
-            application = Application.builder().token(token).build()
-            
-            # 配置 Handlers (使用通用的 setup_bot 函数)
-            setup_bot(application, idx)
-            
-            # 将实例添加到全局列表
-            BOT_APPLICATIONS.append(application)
-            
-            logger.info(f"Bot Application 实例已为 Token (尾号: {token[-4:]}) 创建。分配 Bot ID: #{idx}")
-            
-        except Exception as e:
-            logger.error(f"初始化 Bot Application 失败 (Token 尾号: {token[-4:]})：{e}")
-
-# --- 5. FastAPI Lifespan 上下文管理器 (Replacement for on_event) ---
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """
-    FastAPI 生命周期管理器：
-    在应用启动时启动 Bot 轮询，在应用关闭时停止 Bot 轮询。
-    """
-    
-    # 启动阶段 (Startup)
-    logger.info("应用启动中... 正在启动 Bot Applications 的后台任务。")
-    await start_bots()
-    
-    # 启动所有 Bot 的 Long Polling
-    if BOT_APPLICATIONS:
-        # 在后台以非阻塞方式启动所有 Bot 的轮询
-        for app_instance in BOT_APPLICATIONS:
-            # 修正: 移除不再支持的 'stop_on_shutdown=True' 参数
-            asyncio.create_task(app_instance.run_polling(drop_pending_updates=True))
-        logger.info("🎉 核心服务启动完成。所有 Bot 已开始轮询。")
     else:
-        logger.warning("服务启动完成，但没有 Bot 运行。")
+        logger.info(f"✅ 成功初始化 {len(BOT_APPLICATIONS)} 个 Bot 实例。")
+        logger.info("🎉 核心服务启动完成。等待 Telegram 的 Webhook 消息...")
 
-    # FastAPI Yield: 此时应用开始接受请求
-    yield
+# --- 6. 动态 Webhook 路由 ---
+@app.post("/{webhook_path}")
+async def handle_webhook(webhook_path: str, request: Request):
+    """
+    这是一个统一的入口点，用于处理所有 Bot 的 Webhook 消息。
+    它会根据访问的路径 (e.g., /bot1_webhook) 找到对应的 Bot 实例来处理消息。
+    """
     
-    # 关闭阶段 (Shutdown)
-    logger.info("应用关闭中... 正在停止 Bot Applications 的后台任务。")
+    if webhook_path not in BOT_APPLICATIONS:
+        logger.warning(f"收到未知路径的请求: /{webhook_path}")
+        return Response(status_code=404) # Not Found
+
+    # 找到对应的 Bot Application 实例
+    application = BOT_APPLICATIONS[webhook_path]
+    token_end = application.bot.token[-4:]
     
-    # 优雅地停止所有 Bot 的轮询
-    for app_instance in BOT_APPLICATIONS:
-        try:
-            # 使用 shutdown() 优雅地停止轮询任务
-            await app_instance.shutdown()
-        except Exception as e:
-            logger.error(f"Bot Application 关闭失败 (Token 尾号: {app_instance.bot.token[-4:]})：{e}")
-            
-    logger.info("应用关闭完成。")
-
-
-# --- 6. FastAPI 应用实例 (使用 lifespan 钩子) ---
-# Gunicorn worker 将加载此应用实例
-app = FastAPI(title="Multi-Bot Telegram Handler", lifespan=lifespan)
-
+    try:
+        # 从请求中解析 Update 对象
+        update_data = await request.json()
+        update = Update.de_json(update_data, application.bot)
+        
+        logger.info(f"Bot (尾号: {token_end}) 收到 Webhook 请求 (路径: /{webhook_path})")
+        
+        # 核心：将 Update 对象交给 Bot 实例处理
+        await application.process_update(update)
+        
+        return Response(status_code=200) # OK
+        
+    except Exception as e:
+        logger.error(f"处理 Webhook 请求失败 (路径: /{webhook_path})：{e}")
+        return Response(status_code=500) # Internal Server Error
 
 # --- 7. 健康检查路由 ---
 @app.get("/")
 async def root():
     """健康检查路由，返回 Bot 状态信息。"""
+    active_bots_info = {}
+    for path, app in BOT_APPLICATIONS.items():
+        active_bots_info[path] = f"Token 尾号: {app.bot.token[-4:]}"
+        
     status = {
         "status": "OK",
-        "message": "Telegram Multi-Bot service is running.",
-        "active_bots": len(BOT_APPLICATIONS),
-        "bot_tokens_found": [app.bot.token[-4:] for app in BOT_APPLICATIONS]
+        "message": "Telegram Multi-Bot Webhook service is running.",
+        "active_bots_count": len(BOT_APPLICATIONS),
+        "active_bots_info": active_bots_info
     }
     return status
