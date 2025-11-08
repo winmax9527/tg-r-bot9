@@ -84,7 +84,7 @@ async def get_final_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # 3. 发送“处理中”提示
     try:
-        await update.message.reply_text("正在为您获取专属链接，请稍候 ...")
+        await update.message.reply_text("正在为您获取专属下载链接，请稍候 ...")
     except Exception as e:
         logger.warning(f"发送“处理中”消息失败: {e}")
 
