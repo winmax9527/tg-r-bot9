@@ -24,9 +24,7 @@ logger = logging.getLogger(__name__)
 # --- 2. 全局状态和数据结构 ---
 BOT_APPLICATIONS: Dict[str, Application] = {}
 BOT_API_URLS: Dict[str, str] = {}
-# --- ⬇️ 新增：用于存储每个 Bot 专属的 APK 模板 ⬇️ ---
 BOT_APK_URLS: Dict[str, str] = {}
-# --- ⬆️ 新增 ⬆️ ---
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 
@@ -42,12 +40,16 @@ ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(安卓专用|安卓专用链接|安卓提
 def generate_universal_subdomain(min_len: int = 3, max_len: int = 7) -> str:
     """(需求 1) 生成一个 3-7 位随机长度的字符串"""
     length = random.randint(min_len, max_len)
-    return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+    # --- ⬇️ 关键修改：只使用小写字母 ⬇️ ---
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
+    # --- ⬆️ 关键修改 ⬆️ ---
 
 def generate_android_specific_subdomain(min_len: int = 4, max_len: int = 9) -> str:
     """(需求 2) 生成一个 4-9 位随机长度的字符串"""
     length = random.randint(min_len, max_len)
-    return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+    # --- ⬇️ 关键修改：只使用小写字母 ⬇️ ---
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
+    # --- ⬆️ 关键修改 ⬆️ ---
 
 def modify_url_subdomain(url_str: str, new_sub: str) -> str:
     """替换 URL 的二级域名"""
@@ -64,7 +66,6 @@ def modify_url_subdomain(url_str: str, new_sub: str) -> str:
         return url_str
 
 # --- 核心处理器 1 (Playwright - 通用链接) ---
-# (此函数 get_universal_link ... 与上一版完全相同，保持不变)
 async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     (需求 1)
@@ -98,7 +99,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # 3. 发送“处理中”提示
     try:
-        await update.message.reply_text("正在为您获取专属通用下载链接，请稍候 ...")
+        await update.message.reply_text("正在为您获取最新专属通用下载链接，请稍候 ...")
     except Exception as e:
         logger.warning(f"发送“处理中”消息失败: {e}")
 
@@ -146,7 +147,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.info(f"步骤 3 成功: 最终 URL -> {final_modified_url}")
 
         # --- 步骤 4: 发送最终 URL ---
-        await update.message.reply_text(f"✅ 您的专属通用链接已生成：\n{final_modified_url}")
+        await update.message.reply_text(f"✅ 您的最新专属通用下载链接已生成：\n{final_modified_url}")
 
     except Exception as e:
         logger.error(f"处理 get_universal_link (Playwright) 时发生错误: {e}")
@@ -157,7 +158,6 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             logger.info("Playwright 页面已关闭。")
 
 # --- 核心处理器 2 (安卓专用链接) ---
-# --- ⬇️ 关键修改：重写此函数以使用环境变量 ⬇️ ---
 async def get_android_specific_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     (需求 2 - 动态模板)
@@ -196,7 +196,6 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         logger.error(f"处理 get_android_specific_link 时发生错误: {e}")
         await update.message.reply_text(f"❌ 处理安卓链接时发生内部错误。")
-# --- ⬆️ 关键修改结束 ⬆️ ---
 
 
 # --- 4. Bot 启动与停止逻辑 ---
@@ -245,9 +244,7 @@ async def startup_event():
     for i in range(1, 10): 
         token_name = f"BOT_TOKEN_{i}"
         api_url_name = f"BOT_{i}_API_URL"
-        # --- ⬇️ 新增：查找 APK URL ⬇️ ---
         apk_url_name = f"BOT_{i}_APK_URL"
-        # --- ⬆️ 新增 ⬆️ ---
         
         token_value = os.getenv(token_name)
         api_url_value = os.getenv(api_url_name)
@@ -266,7 +263,6 @@ async def startup_event():
             webhook_path = f"bot{i}_webhook"
             BOT_APPLICATIONS[webhook_path] = application
             
-            # --- ⬇️ 关键修改：分别检查并加载 API 和 APK URL ⬇️ ---
             # 加载 API URL (用于通用链接)
             if api_url_value:
                 BOT_API_URLS[webhook_path] = api_url_value 
@@ -281,7 +277,6 @@ async def startup_event():
                 logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已加载 [安卓专用模板]: {apk_url_value}")
             else:
                 logger.warning(f"DIAGNOSTIC: Bot #{i} 未找到 {apk_url_name}。[安卓专用链接] 功能将无法工作。")
-            # --- ⬆️ 关键修改结束 ⬆️ ---
                 
             logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已创建并初始化。监听路径: /{webhook_path}")
 
