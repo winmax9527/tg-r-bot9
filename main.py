@@ -31,25 +31,21 @@ BROWSER_INSTANCE: Browser | None = None
 # --- 3. 核心功能：获取动态链接 ---
 
 # 需求 1: 通用链接 (iOS/安卓) 关键字
-UNIVERSAL_COMMAND_PATTERN = r"^(地址|下载地址|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接)$"
+UNIVERSAL_COMMAND_PATTERN = r"^(地址|下载地址|下载链接|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接)$"
 
 # 需求 2: 安卓专用链接 关键字
-ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
+ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(安卓直接下载|安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
 
 # --- 辅助函数 ---
-def generate_universal_subdomain(min_len: int = 3, max_len: int = 7) -> str:
-    """(需求 1) 生成一个 3-7 位随机长度的字符串"""
+def generate_universal_subdomain(min_len: int = 4, max_len: int = 7) -> str:
+    """(需求 1) 生成一个 4-7 位随机长度的字符串"""
     length = random.randint(min_len, max_len)
-    # --- ⬇️ 关键修改：只使用小写字母 ⬇️ ---
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
-    # --- ⬆️ 关键修改 ⬆️ ---
 
-def generate_android_specific_subdomain(min_len: int = 4, max_len: int = 9) -> str:
-    """(需求 2) 生成一个 4-9 位随机长度的字符串"""
+def generate_android_specific_subdomain(min_len: int = 5, max_len: int = 9) -> str:
+    """(需求 2) 生成一个 5-9 位随机长度的字符串"""
     length = random.randint(min_len, max_len)
-    # --- ⬇️ 关键修改：只使用小写字母 ⬇️ ---
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
-    # --- ⬆️ 关键修改 ⬆️ ---
 
 def modify_url_subdomain(url_str: str, new_sub: str) -> str:
     """替换 URL 的二级域名"""
@@ -99,7 +95,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # 3. 发送“处理中”提示
     try:
-        await update.message.reply_text("正在为您获取最新专属通用下载链接，请稍候 ...")
+        await update.message.reply_text("正在为您获取专属通用下载链接，请稍候 ...")
     except Exception as e:
         logger.warning(f"发送“处理中”消息失败: {e}")
 
@@ -133,25 +129,37 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.info(f"步骤 2: (Playwright) 正在启动新页面访问 {domain_a}...")
         
         page = await fastapi_app.state.browser.new_page()
-        page.set_default_timeout(25000) 
+        
+        # --- 
+        # --- ⬇️ 关键修复：把“耐心”从 25 秒提高到 40 秒 ⬇️ ---
+        #
+        page.set_default_timeout(40000) # 40 秒超时 (原为 25000)
+        #
+        # --- ⬆️ 关键修复 ⬆️ ---
+        # --- 
 
         await page.goto(domain_a, wait_until="networkidle") 
         
         domain_b = page.url 
         logger.info(f"步骤 2 成功: 获取到 域名 B -> {domain_b}")
 
-        # --- 步骤 3: 修改 域名 B 的二级域名 (3-7位) ---
-        logger.info(f"步骤 3: 正在为 {domain_b} 生成 3-7 位随机二级域名...")
-        random_sub = generate_universal_subdomain() # 3-7 位
+        # --- 步骤 3: 修改 域名 B 的二级域名 (4-7位) ---
+        logger.info(f"步骤 3: 正在为 {domain_b} 生成 4-7 位随机二级域名...")
+        random_sub = generate_universal_subdomain() # 4-7 位
         final_modified_url = modify_url_subdomain(domain_b, random_sub)
         logger.info(f"步骤 3 成功: 最终 URL -> {final_modified_url}")
 
         # --- 步骤 4: 发送最终 URL ---
-        await update.message.reply_text(f"✅ 您的最新专属通用下载链接已生成：\n{final_modified_url}")
+        await update.message.reply_text(f"✅ 您的专属通用链接已生成：\n{final_modified_url}")
 
     except Exception as e:
         logger.error(f"处理 get_universal_link (Playwright) 时发生错误: {e}")
-        await update.message.reply_text(f"❌ 链接获取失败：{type(e).__name__}。")
+        # --- ⬇️ 改进：向用户报告超时错误 ⬇️ ---
+        if "Timeout" in str(e):
+            await update.message.reply_text("❌ 链接获取失败：目标网页加载超时（超过 40 秒）。")
+        else:
+            await update.message.reply_text(f"❌ 链接获取失败：{type(e).__name__}。")
+        # --- ⬆️ 改进 ⬆️ ---
     finally:
         if page:
             await page.close() 
@@ -163,7 +171,7 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
     (需求 2 - 动态模板)
     1. 收到 "安卓专用" 关键字
     2. 查找此 Bot 专属的 APK_URL 模板
-    3. 生成 4-9 位随机字符串
+    3. 生成 5-9 位随机字符串
     4. 替换模板中的 *
     5. 发送
     """
@@ -184,7 +192,7 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
         return
         
     try:
-        # 2. 生成 4-9 位随机二级域名
+        # 2. 生成 5-9 位随机二级域名
         random_sub = generate_android_specific_subdomain()
         
         # 3. 格式化 URL (替换模板中的第一个 *)
@@ -247,7 +255,6 @@ async def startup_event():
         apk_url_name = f"BOT_{i}_APK_URL"
         
         token_value = os.getenv(token_name)
-        api_url_value = os.getenv(api_url_name)
         
         # 只要有 Token，就加载 Bot
         if token_value:
@@ -264,6 +271,7 @@ async def startup_event():
             BOT_APPLICATIONS[webhook_path] = application
             
             # 加载 API URL (用于通用链接)
+            api_url_value = os.getenv(api_url_name)
             if api_url_value:
                 BOT_API_URLS[webhook_path] = api_url_value 
                 logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已加载 [通用链接 API]: {api_url_value}")
