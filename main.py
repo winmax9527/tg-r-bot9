@@ -36,7 +36,7 @@ BROWSER_INSTANCE: Browser | None = None
 UNIVERSAL_COMMAND_PATTERN = r"^(地址|下载地址|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接)$"
 
 # 需求 2: 安卓专用链接 关键字
-ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
+ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
 
 # --- 辅助函数 ---
 def generate_universal_subdomain(min_len: int = 3, max_len: int = 7) -> str:
