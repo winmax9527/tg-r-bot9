@@ -33,7 +33,7 @@ BROWSER_INSTANCE: Browser | None = None
 # --- 3. 核心功能：获取动态链接 ---
 
 # 需求 1: 通用链接 (iOS/安卓) 关键字
-UNIVERSAL_COMMAND_PATTERN = r"^(地址|下载地址|下载链接|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接)$"
+UNIVERSAL_COMMAND_PATTERN = r"^(地址|下载地址|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|下载链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接)$"
 
 # 需求 2: 安卓专用链接 关键字
 ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
@@ -102,7 +102,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.warning(f"发送“处理中”消息失败: {e}")
 
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/5.37.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
     
     page = None 
@@ -138,7 +138,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         domain_b = page.url 
         logger.info(f"步骤 2 成功: 获取到 域名 B (完整): {domain_b}")
 
-        # --- 步骤 3: 修改 域名 B 的二级域名 (3-7位) ---
+        # --- 步骤 3: 修改 域名 B 的二级域名 (4-7位) ---
         logger.info(f"步骤 3: 正在为 {domain_b} 生成 4-7 位随机二级域名...")
         random_sub = generate_universal_subdomain() # 4-7 位
         final_modified_url = modify_url_subdomain(domain_b, random_sub)
@@ -164,7 +164,7 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
     (需求 2 - 动态模板)
     1. 收到 "安卓专用" 关键字
     2. 查找此 Bot 专属的 APK_URL 模板
-    3. 生成 5-9 位随机字符串
+    3. 生成 4-9 位随机字符串
     4. 替换模板中的 *
     5. 发送
     """
@@ -185,14 +185,14 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
         return
         
     try:
-        # 2. 生成 4-9 位随机二级域名
+        # 2. 生成 5-9 位随机二级域名
         random_sub = generate_android_specific_subdomain()
         
         # 3. 格式化 URL (替换模板中的第一个 *)
         final_url = apk_template.replace("*", random_sub, 1)
         
         # 4. 发送
-        await update.message.reply_text(f"✅ 您的专属安卓专用链接已生成：\n{final_url}")
+        await update.message.reply_text(f"✅ 您的专属安卓专用下载链接已生成：\n{final_url}")
         
     except Exception as e:
         logger.error(f"处理 get_android_specific_link 时发生错误: {e}")
@@ -268,16 +268,21 @@ async def background_scheduler():
                     if should_send:
                         application = BOT_APPLICATIONS.get(webhook_path)
                         if application:
-                            chat_id = schedule["chat_id"]
+                            # --- ⬇️ 关键修复：循环发送到多个 Chat ID ⬇️ ---
+                            chat_ids_list = schedule["chat_ids"] # <-- 获取列表
                             message = schedule["message"]
                             
-                            logger.info(f"Bot (路径: {webhook_path}) 正在发送定时消息到 Chat ID: {chat_id}...")
-                            try:
-                                await application.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML') # 允许 HTML 格式
-                                schedule["last_sent"] = now_utc # 更新“上次发送时间”
-                                logger.info(f"Bot (路径: {webhook_path}) 定时消息发送成功。")
-                            except Exception as e:
-                                logger.error(f"Bot (路径: {webhook_path}) 发送定时消息失败: {e}")
+                            logger.info(f"Bot (路径: {webhook_path}) 正在发送定时消息到 {len(chat_ids_list)} 个 Chats...")
+                            
+                            for chat_id in chat_ids_list: # <-- 循环
+                                try:
+                                    await application.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML') # 允许 HTML 格式
+                                    logger.info(f"Bot (路径: {webhook_path}) 定时消息 -> {chat_id} 发送成功。")
+                                except Exception as e:
+                                    logger.error(f"Bot (路径: {webhook_path}) 发送定时消息 -> {chat_id} 失败: {e}")
+                            
+                            schedule["last_sent"] = now_utc # 更新“上次发送时间”
+                            # --- ⬆️ 关键修复 ⬆️ ---
                         else:
                             logger.warning(f"调度器：找不到 Bot Application 实例 (路径: {webhook_path})")
 
@@ -337,24 +342,30 @@ async def startup_event():
                 logger.warning(f"DIAGNOSTIC: Bot #{i} 未找到 {apk_url_name}。[安卓专用链接] 功能将无法工作。")
 
             # --- ⬇️ 关键修改：加载固定时间点配置 ⬇️ ---
-            schedule_chat_id = os.getenv(f"BOT_{i}_SCHEDULE_CHAT_ID")
-            schedule_times_str = os.getenv(f"BOT_{i}_SCHEDULE_TIMES_UTC") # <-- 新变量
+            schedule_chat_ids_str = os.getenv(f"BOT_{i}_SCHEDULE_CHAT_ID") # <-- 读取逗号分隔的字符串
+            schedule_times_str = os.getenv(f"BOT_{i}_SCHEDULE_TIMES_UTC")
             schedule_message = os.getenv(f"BOT_{i}_SCHEDULE_MESSAGE")
 
-            if schedule_chat_id and schedule_times_str and schedule_message:
+            if schedule_chat_ids_str and schedule_times_str and schedule_message:
                 try:
                     # 解析逗号分隔的时间列表
                     times_list = [t.strip() for t in schedule_times_str.split(',') if t.strip()]
                     if not times_list:
                         raise ValueError("时间列表为空")
 
+                    # --- ⬇️ 关键修复：解析逗号分隔的 Chat ID 列表 ⬇️ ---
+                    chat_ids_list = [cid.strip() for cid in schedule_chat_ids_str.split(',') if cid.strip()]
+                    if not chat_ids_list:
+                        raise ValueError("Chat ID 列表为空")
+                    # --- ⬆️ 关键修复 ⬆️ ---
+
                     BOT_SCHEDULES[webhook_path] = {
-                        "chat_id": schedule_chat_id,
-                        "times": times_list, # <-- 存储列表
+                        "chat_ids": chat_ids_list, # <-- 存储 Chat ID 列表
+                        "times": times_list, # <-- 存储时间列表
                         "message": schedule_message,
                         "last_sent": None # 第一次运行时会立即发送
                     }
-                    logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已加载 [定时任务]: 在 UTC {times_list} 发送到 {schedule_chat_id}")
+                    logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已加载 [定时任务]: 在 UTC {times_list} 发送到 {len(chat_ids_list)} 个 Chat(s)")
                 except Exception as e:
                     logger.error(f"Bot #{i} 的定时任务配置错误: {e}")
             else:
@@ -427,7 +438,7 @@ async def root():
     for path, app in BOT_APPLICATIONS.items():
         schedule_info = "未配置"
         if BOT_SCHEDULES.get(path):
-            schedule_info = f"配置于 UTC {BOT_SCHEDULES[path]['times']}" # <-- 更新状态
+            schedule_info = f"配置于 UTC {BOT_SCHEDULES[path]['times']} -> {len(BOT_SCHEDULES[path]['chat_ids'])} 个 Chat(s)" # <-- 更新状态
             
         active_bots_info[path] = {
             "token_end": app.bot.token[-4:],
