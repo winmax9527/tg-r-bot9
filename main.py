@@ -32,31 +32,24 @@ PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 
 # --- 3. 核心功能：获取动态链接 ---
-
-# 需求 1: 通用链接 (您修改后的)
+# (所有关键字定义与您上一版 21:40 的代码相同)
 UNIVERSAL_COMMAND_PATTERN = r"^(地址|下载地址|下载链接|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接)$"
-# 需求 2: 安卓专用链接 (您修改后的)
-ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(提包|提包地址|提包链接|安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
-# 需求 3: 苹果重启指南 (您修改后的)
+ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(提包|安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
 IOS_QUIT_PATTERN = r"^(苹果大退|苹果重启|苹果大退重启|苹果黑屏|苹果重开)$"
-# 需求 4: 安卓重启指南 (您修改后的)
 ANDROID_QUIT_PATTERN = r"^(安卓大退|安卓重启|安卓大退重启|安卓黑屏|安卓重开|大退|重开|闪退|卡了|黑屏)$"
-# 需求 5: 安卓浏览器指南 (您修改后的)
-ANDROID_BROWSER_PATTERN = r"^(安卓浏览器手机版|安卓桌面版|浏览器设置)$"
-# 需求 6: 苹果浏览器指南 (您修改后的)
+ANDROID_BROWSER_PATTERN = r"^(安卓浏览器手机版|安卓桌面版|安卓浏览器|浏览器设置)$"
 IOS_BROWSER_PATTERN = r"^(苹果浏览器手机版|苹果浏览器|苹果桌面版)$"
-# 需求 7: 安卓窗口上限指南 (您修改后的)
 ANDROID_TAB_LIMIT_PATTERN = r"^(安卓窗口上限|窗口上限|标签上限)$"
-# 需求 8: 苹果窗口上限指南 (您修改后的)
 IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
 
 
 # --- 辅助函数 ---
 
-# --- ⬇️ 安全检查辅助函数 (重新加入) ⬇️ ---
+# --- ⬇️ 关键修复：智能安全检查 ⬇️ ---
 def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
     """
-    安全检查：检查此消息的 Chat ID 是否在当前 Bot 的“白名单”上。
+    智能安全检查：
+    检查此消息的 Chat ID (及其 -100 变体) 是否在当前 Bot 的“白名单”上。
     """
     current_app = context.application
     allowed_list: List[str] = []
@@ -69,31 +62,32 @@ def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
             break
             
     # 将传入的 chat_id (int) 转换为 str
-    chat_id_str = str(chat_id)
+    chat_id_str_short = str(chat_id) # 这可能是 "短" ID (例如: -466...)
     
-    if chat_id_str not in allowed_list:
-        # 如果不在白名单中，记录警告并拒绝
-        logger.warning(f"Bot (尾号: {current_app.bot.token[-4:]}) 收到来自 [未授权] Chat ID: {chat_id_str} 的请求。已忽略。")
-        return False
+    # 自动创建 "长" ID (例如: -100466...)
+    chat_id_str_long = f"-100{chat_id_str_short.lstrip('-')}" if chat_id_str_short.startswith('-') else chat_id_str_short
+
+    # 只要 "短" ID 或 "长" ID *任何一个* 在白名单中，就允许
+    if chat_id_str_short in allowed_list or chat_id_str_long in allowed_list:
+        return True # 在白名单中，允许
     
-    # 在白名单中，允许
-    return True
-# --- ⬆️ 安全检查辅助函数 (重新加入) ⬆️ ---
+    # 如果两个都不在，记录警告并拒绝
+    logger.warning(f"Bot (尾号: {current_app.bot.token[-4:]}) 收到来自 [未授权] Chat ID: {chat_id_str_short} (已检查 {chat_id_str_long}) 的请求。已忽略。")
+    return False
+# --- ⬆️ 关键修复 ⬆️ ---
 
 
-# --- ⬇️ 您修改后的 (4-7 位) ⬇️ ---
+# (您修改后的 4-7 位)
 def generate_universal_subdomain(min_len: int = 4, max_len: int = 7) -> str:
     """(需求 1) 生成一个 4-7 位随机长度的字符串 (仅小写)"""
     length = random.randint(min_len, max_len)
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
-# --- ⬆️ 您修改后的 ⬆️ ---
 
-# --- ⬇️ 您修改后的 (5-9 位) ⬇️ ---
+# (您修改后的 5-9 位)
 def generate_android_specific_subdomain(min_len: int = 5, max_len: int = 9) -> str:
     """(需求 2) 生成一个 5-9 位随机长度的字符串 (仅小写)"""
     length = random.randint(min_len, max_len)
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
-# --- ⬆️ 您修改后的 ⬆️ ---
 
 def modify_url_subdomain(url_str: str, new_sub: str) -> str:
     """替换 URL 的二级域名"""
@@ -113,10 +107,10 @@ def modify_url_subdomain(url_str: str, new_sub: str) -> str:
 async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 1) - Playwright 动态链接 """
     
-    # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+    # --- ⬇️ 智能安全检查 ⬇️ ---
     if not update.message or not is_chat_allowed(context, update.message.chat_id):
         return # 不在白名单，立即停止
-    # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+    # --- ⬆️ 智能安全检查 ⬆️ ---
 
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [通用链接] 关键字，开始执行 [Playwright] 链接获取...")
@@ -208,10 +202,10 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def get_android_specific_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 2 - 动态模板) """
 
-    # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+    # --- ⬇️ 智能安全检查 ⬇️ ---
     if not update.message or not is_chat_allowed(context, update.message.chat_id):
         return # 不在白名单，立即停止
-    # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+    # --- ⬆️ 智能安全检查 ⬆️ ---
 
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [安卓专用] 关键字，开始生成 APK 链接...")
@@ -247,10 +241,10 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
 async def send_ios_quit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 3 - 静态回复 iOS) """
     
-    # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+    # --- ⬇️ 智能安全检查 ⬇️ ---
     if not update.message or not is_chat_allowed(context, update.message.chat_id):
         return # 不在白名单，立即停止
-    # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+    # --- ⬆️ 智能安全检查 ⬆️ ---
 
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [苹果大退] 关键字，发送 iOS 重启指南...")
@@ -273,10 +267,10 @@ async def send_ios_quit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def send_android_quit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 4 - 静态回复 Android) """
     
-    # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+    # --- ⬇️ 智能安全检查 ⬇️ ---
     if not update.message or not is_chat_allowed(context, update.message.chat_id):
         return # 不在白名单，立即停止
-    # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+    # --- ⬆️ 智能安全检查 ⬆️ ---
 
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [安卓大退] 关键字，发送 Android 重启指南...")
@@ -301,10 +295,10 @@ async def send_android_quit_guide(update: Update, context: ContextTypes.DEFAULT_
 async def send_android_browser_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 5 - 静态回复 Android 浏览器) """
     
-    # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+    # --- ⬇️ 智能安全检查 ⬇️ ---
     if not update.message or not is_chat_allowed(context, update.message.chat_id):
         return # 不在白名单，立即停止
-    # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+    # --- ⬆️ 智能安全检查 ⬆️ ---
 
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [安卓浏览器] 关键字，发送浏览器指南...")
@@ -333,10 +327,10 @@ async def send_android_browser_guide(update: Update, context: ContextTypes.DEFAU
 async def send_ios_browser_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 6 - 静态回复 Apple 浏览器) """
     
-    # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+    # --- ⬇️ 智能安全检查 ⬇️ ---
     if not update.message or not is_chat_allowed(context, update.message.chat_id):
         return # 不在白名单，立即停止
-    # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+    # --- ⬆️ 智能安全检查 ⬆️ ---
 
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [苹果浏览器] 关键字，发送浏览器指南...")
@@ -367,10 +361,10 @@ async def send_ios_browser_guide(update: Update, context: ContextTypes.DEFAULT_T
 async def send_android_tab_limit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 7 - 静态回复 Android 窗口上限) """
     
-    # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+    # --- ⬇️ 智能安全检查 ⬇️ ---
     if not update.message or not is_chat_allowed(context, update.message.chat_id):
         return # 不在白名单，立即停止
-    # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+    # --- ⬆️ 智能安全检查 ⬆️ ---
 
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [安卓窗口上限] 关键字，发送窗口指南...")
@@ -397,10 +391,10 @@ async def send_android_tab_limit_guide(update: Update, context: ContextTypes.DEF
 async def send_ios_tab_limit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 8 - 静态回复 Apple 窗口上限) """
     
-    # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+    # --- ⬇️ 智能安全检查 ⬇️ ---
     if not update.message or not is_chat_allowed(context, update.message.chat_id):
         return # 不在白名单，立即停止
-    # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+    # --- ⬆️ 智能安全检查 ⬆️ ---
 
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [苹果窗口上限] 关键字，发送窗口指南...")
@@ -494,10 +488,10 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
     
     async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
-        # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+        # --- ⬇️ 智能安全检查 ⬇️ ---
         if not update.message or not is_chat_allowed(context, update.message.chat_id):
             return # 不在白名单，立即停止
-        # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+        # --- ⬆️ 智能安全检查 ⬆️ ---
 
         # (您修改后的 /start 消息)
         await update.message.reply_html(f"🤖 Bot #{bot_index} (尾号: {token_end}) 已准备就绪。\n"
@@ -578,7 +572,7 @@ async def startup_event():
     BOT_API_URLS = {}
     BOT_APK_URLS = {}
     BOT_SCHEDULES = {} 
-    BOT_ALLOWED_CHATS = {} # <-- 安全白名单 (重新加入)
+    BOT_ALLOWED_CHATS = {} # <-- 智能安全白名单
 
     logger.info("应用启动中... 正在查找所有 Bot 配置。")
 
@@ -642,7 +636,7 @@ async def startup_event():
             else:
                 logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 未配置定时任务。")
 
-            # --- ⬇️ 安全白名单 (重新加入) ⬇️ ---
+            # --- ⬇️ 智能安全白名单 (重新加入) ⬇️ ---
             allowed_chats_name = f"BOT_{i}_ALLOWED_CHAT_IDS"
             allowed_chats_str = os.getenv(allowed_chats_name)
             if allowed_chats_str:
@@ -651,7 +645,7 @@ async def startup_event():
                 logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已加载 [安全白名单]: 允许 {len(chat_ids_list)} 个 Chat(s)")
             else:
                 logger.warning(f"DIAGNOSTIC: Bot #{i} 未找到 {allowed_chats_name}。此 Bot 将 [不会] 响应任何群组或私聊的指令。")
-            # --- ⬆️ 安全白名单 (重新加入) ⬆️ ---
+            # --- ⬆️ 智能安全白名单 (重新加入) ⬆️ ---
                 
             logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已创建并初始化。监听路径: /{webhook_path}")
 
