@@ -5,8 +5,9 @@ import re
 import requests # 用于快速获取域名 A
 import random
 import string
+import datetime # <-- 用于定时任务
 from urllib.parse import urlparse, urlunparse
-from typing import List, Dict
+from typing import List, Dict, Any 
 from fastapi import FastAPI, Request, Response
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 BOT_APPLICATIONS: Dict[str, Application] = {}
 BOT_API_URLS: Dict[str, str] = {}
 BOT_APK_URLS: Dict[str, str] = {}
+BOT_SCHEDULES: Dict[str, Dict[str, Any]] = {} # <-- 用于定时任务
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 
@@ -34,16 +36,16 @@ BROWSER_INSTANCE: Browser | None = None
 UNIVERSAL_COMMAND_PATTERN = r"^(地址|下载地址|下载链接|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接)$"
 
 # 需求 2: 安卓专用链接 关键字
-ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(安卓直接下载|安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
+ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
 
 # --- 辅助函数 ---
 def generate_universal_subdomain(min_len: int = 4, max_len: int = 7) -> str:
-    """(需求 1) 生成一个 4-7 位随机长度的字符串"""
+    """(需求 1) 生成一个 4-7 位随机长度的字符串 (仅小写)"""
     length = random.randint(min_len, max_len)
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
 def generate_android_specific_subdomain(min_len: int = 5, max_len: int = 9) -> str:
-    """(需求 2) 生成一个 5-9 位随机长度的字符串"""
+    """(需求 2) 生成一个 5-9 位随机长度的字符串 (仅小写)"""
     length = random.randint(min_len, max_len)
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
@@ -67,8 +69,8 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
     (需求 1)
     1. [Requests] 访问 API 获取 域名 A
     2. [Playwright] 访问 域名 A 获取 域名 B
-    3. 修改 域名 B 的二级域名 (3-7位)
-    4. 发送最终 URL
+    3. 修改 域名 B 的二级域名 (4-7位)
+    4. 发送最终 URL (保留 ? 参数)
     """
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [通用链接] 关键字，开始执行 [Playwright] 链接获取...")
@@ -129,37 +131,28 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.info(f"步骤 2: (Playwright) 正在启动新页面访问 {domain_a}...")
         
         page = await fastapi_app.state.browser.new_page()
-        
-        # --- 
-        # --- ⬇️ 关键修复：把“耐心”从 25 秒提高到 40 秒 ⬇️ ---
-        #
-        page.set_default_timeout(40000) # 40 秒超时 (原为 25000)
-        #
-        # --- ⬆️ 关键修复 ⬆️ ---
-        # --- 
+        page.set_default_timeout(40000) # 40 秒超时
 
         await page.goto(domain_a, wait_until="networkidle") 
         
         domain_b = page.url 
-        logger.info(f"步骤 2 成功: 获取到 域名 B -> {domain_b}")
+        logger.info(f"步骤 2 成功: 获取到 域名 B (完整): {domain_b}")
 
-        # --- 步骤 3: 修改 域名 B 的二级域名 (4-7位) ---
+        # --- 步骤 3: 修改 域名 B 的二级域名 (3-7位) ---
         logger.info(f"步骤 3: 正在为 {domain_b} 生成 4-7 位随机二级域名...")
         random_sub = generate_universal_subdomain() # 4-7 位
         final_modified_url = modify_url_subdomain(domain_b, random_sub)
         logger.info(f"步骤 3 成功: 最终 URL -> {final_modified_url}")
 
         # --- 步骤 4: 发送最终 URL ---
-        await update.message.reply_text(f"✅ 您的专属通用链接已生成：\n{final_modified_url}")
+        await update.message.reply_text(f"✅ 您的专属通用下载链接已生成：\n{final_modified_url}")
 
     except Exception as e:
         logger.error(f"处理 get_universal_link (Playwright) 时发生错误: {e}")
-        # --- ⬇️ 改进：向用户报告超时错误 ⬇️ ---
         if "Timeout" in str(e):
             await update.message.reply_text("❌ 链接获取失败：目标网页加载超时（超过 40 秒）。")
         else:
             await update.message.reply_text(f"❌ 链接获取失败：{type(e).__name__}。")
-        # --- ⬆️ 改进 ⬆️ ---
     finally:
         if page:
             await page.close() 
@@ -192,7 +185,7 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
         return
         
     try:
-        # 2. 生成 5-9 位随机二级域名
+        # 2. 生成 4-9 位随机二级域名
         random_sub = generate_android_specific_subdomain()
         
         # 3. 格式化 URL (替换模板中的第一个 *)
@@ -237,23 +230,78 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
 # --- 5. FastAPI 应用实例 ---
 app = FastAPI(title="Multi-Bot Playwright Service")
 
-# --- 6. 应用启动/关闭事件 (与之前相同, 100% 正确) ---
+# --- 6. 应用启动/关闭事件 ---
+
+# --- ⬇️ 关键修改：后台调度器 (固定时间点) ⬇️ ---
+async def background_scheduler():
+    """每60秒检查一次是否有到期的定时任务"""
+    logger.info("后台调度器已启动... (每 60 秒检查一次)")
+    await asyncio.sleep(10) # 启动时稍微延迟，等待服务完全启动
+
+    while True:
+        try:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            current_utc_hm = now_utc.strftime("%H:%M") # 格式: "14:01"
+            
+            # logger.info(f"调度器检查时间 (UTC): {current_utc_hm}") # (取消注释以进行调试)
+            
+            # 遍历所有已配置的计划
+            for webhook_path, schedule in BOT_SCHEDULES.items():
+                
+                # 检查当前时间是否在“待发送时间列表”中
+                if current_utc_hm in schedule["times"]:
+                    
+                    # 是的，到时间了。但我们发送过了吗？
+                    last_sent_time = schedule.get("last_sent")
+                    should_send = False
+                    
+                    if last_sent_time is None: # 第一次运行，立即发送
+                        should_send = True
+                    else:
+                        # 检查自上次发送以来是否已过了足够长的时间（例如 > 1小时）
+                        # 这可以防止服务在 14:00 重启 3 次，导致连发 3 条消息
+                        delta = now_utc - last_sent_time
+                        if delta.total_seconds() > 3540: # (略小于 60 分钟)
+                            should_send = True
+                            
+                    # 如果需要发送...
+                    if should_send:
+                        application = BOT_APPLICATIONS.get(webhook_path)
+                        if application:
+                            chat_id = schedule["chat_id"]
+                            message = schedule["message"]
+                            
+                            logger.info(f"Bot (路径: {webhook_path}) 正在发送定时消息到 Chat ID: {chat_id}...")
+                            try:
+                                await application.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML') # 允许 HTML 格式
+                                schedule["last_sent"] = now_utc # 更新“上次发送时间”
+                                logger.info(f"Bot (路径: {webhook_path}) 定时消息发送成功。")
+                            except Exception as e:
+                                logger.error(f"Bot (路径: {webhook_path}) 发送定时消息失败: {e}")
+                        else:
+                            logger.warning(f"调度器：找不到 Bot Application 实例 (路径: {webhook_path})")
+
+        except Exception as e:
+            logger.error(f"后台调度器发生严重错误: {e}")
+            
+        await asyncio.sleep(60) # 休息 60 秒
+# --- ⬆️ 关键修改 ⬆️ ---
+
+
 @app.on_event("startup")
 async def startup_event():
-    """在 FastAPI 启动时：1. 初始化 Bot 2. 启动全局 Playwright 浏览器"""
+    """在 FastAPI 启动时：1. 初始化 Bot 2. 启动 Playwright 3. 启动调度器"""
     
-    global BOT_APPLICATIONS, BOT_API_URLS, BOT_APK_URLS, PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
+    global BOT_APPLICATIONS, BOT_API_URLS, BOT_APK_URLS, BOT_SCHEDULES, PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
     BOT_APPLICATIONS = {}
     BOT_API_URLS = {}
-    BOT_APK_URLS = {} # 初始化新字典
+    BOT_APK_URLS = {}
+    BOT_SCHEDULES = {} # 初始化新字典
 
-    logger.info("应用启动中... 正在查找 Bot Token 和 专属 API/APK URL。")
+    logger.info("应用启动中... 正在查找所有 Bot 配置。")
 
     for i in range(1, 10): 
         token_name = f"BOT_TOKEN_{i}"
-        api_url_name = f"BOT_{i}_API_URL"
-        apk_url_name = f"BOT_{i}_APK_URL"
-        
         token_value = os.getenv(token_name)
         
         # 只要有 Token，就加载 Bot
@@ -270,7 +318,8 @@ async def startup_event():
             webhook_path = f"bot{i}_webhook"
             BOT_APPLICATIONS[webhook_path] = application
             
-            # 加载 API URL (用于通用链接)
+            # 1. 加载 API URL (用于通用链接)
+            api_url_name = f"BOT_{i}_API_URL"
             api_url_value = os.getenv(api_url_name)
             if api_url_value:
                 BOT_API_URLS[webhook_path] = api_url_value 
@@ -278,13 +327,39 @@ async def startup_event():
             else:
                  logger.warning(f"DIAGNOSTIC: Bot #{i} 未找到 {api_url_name}。[通用链接] 功能将无法工作。")
 
-            # 加载 APK URL (用于安卓专用链接)
+            # 2. 加载 APK URL (用于安卓专用链接)
+            apk_url_name = f"BOT_{i}_APK_URL"
             apk_url_value = os.getenv(apk_url_name)
             if apk_url_value:
                 BOT_APK_URLS[webhook_path] = apk_url_value
                 logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已加载 [安卓专用模板]: {apk_url_value}")
             else:
                 logger.warning(f"DIAGNOSTIC: Bot #{i} 未找到 {apk_url_name}。[安卓专用链接] 功能将无法工作。")
+
+            # --- ⬇️ 关键修改：加载固定时间点配置 ⬇️ ---
+            schedule_chat_id = os.getenv(f"BOT_{i}_SCHEDULE_CHAT_ID")
+            schedule_times_str = os.getenv(f"BOT_{i}_SCHEDULE_TIMES_UTC") # <-- 新变量
+            schedule_message = os.getenv(f"BOT_{i}_SCHEDULE_MESSAGE")
+
+            if schedule_chat_id and schedule_times_str and schedule_message:
+                try:
+                    # 解析逗号分隔的时间列表
+                    times_list = [t.strip() for t in schedule_times_str.split(',') if t.strip()]
+                    if not times_list:
+                        raise ValueError("时间列表为空")
+
+                    BOT_SCHEDULES[webhook_path] = {
+                        "chat_id": schedule_chat_id,
+                        "times": times_list, # <-- 存储列表
+                        "message": schedule_message,
+                        "last_sent": None # 第一次运行时会立即发送
+                    }
+                    logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已加载 [定时任务]: 在 UTC {times_list} 发送到 {schedule_chat_id}")
+                except Exception as e:
+                    logger.error(f"Bot #{i} 的定时任务配置错误: {e}")
+            else:
+                logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 未配置定时任务。")
+            # --- ⬆️ 关键修改 ⬆️ ---
                 
             logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已创建并初始化。监听路径: /{webhook_path}")
 
@@ -293,6 +368,7 @@ async def startup_event():
     else:
         logger.info(f"✅ 成功初始化 {len(BOT_APPLICATIONS)} 个 Bot 实例。")
 
+    # 6.2 启动 Playwright
     logger.info("正在启动全局 Playwright 实例...")
     try:
         PLAYWRIGHT_INSTANCE = await async_playwright().start()
@@ -302,10 +378,15 @@ async def startup_event():
         )
         app.state.browser = BROWSER_INSTANCE 
         logger.info("🎉 全局 Playwright Chromium 浏览器启动成功！")
-        logger.info("🎉 核心服务启动完成。等待 Telegram 的 Webhook 消息...")
     except Exception as e:
         logger.error(f"❌ 启动 Playwright 失败: {e}")
         logger.error("服务将启动，但 Playwright 功能将无法工作！")
+
+    # 启动后台调度器
+    logger.info("正在启动后台定时任务调度器...")
+    asyncio.create_task(background_scheduler())
+
+    logger.info("🎉 核心服务启动完成。等待 Telegram 的 Webhook 消息...")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -344,14 +425,21 @@ async def root():
 
     active_bots_info = {}
     for path, app in BOT_APPLICATIONS.items():
+        schedule_info = "未配置"
+        if BOT_SCHEDULES.get(path):
+            schedule_info = f"配置于 UTC {BOT_SCHEDULES[path]['times']}" # <-- 更新状态
+            
         active_bots_info[path] = {
             "token_end": app.bot.token[-4:],
             "api_url_universal": BOT_API_URLS.get(path, "未设置!"),
-            "api_url_android_apk": BOT_APK_URLS.get(path, "未设置!")
+            "api_url_android_apk": BOT_APK_URLS.get(path, "未设置!"),
+            # --- ⬇️ 新增：在健康检查中显示定时任务状态 ⬇️ ---
+            "schedule_info": schedule_info
+            # --- ⬆️ 新增 ⬆️ ---
         }
     status = {
         "status": "OK",
-        "message": "Telegram Multi-Bot (Playwright JS) service is running.",
+        "message": "Telegram Multi-Bot (Playwright JS + Scheduler) service is running.",
         "browser_status": browser_status,
         "active_bots_count": len(BOT_APPLICATIONS),
         "active_bots_info": active_bots_info
