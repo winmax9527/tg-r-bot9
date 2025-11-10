@@ -26,26 +26,33 @@ logger = logging.getLogger(__name__)
 BOT_APPLICATIONS: Dict[str, Application] = {}
 BOT_API_URLS: Dict[str, str] = {}
 BOT_APK_URLS: Dict[str, str] = {}
-BOT_SCHEDULES: Dict[str, Dict[str, Any]] = {} # <-- 用于定时任务
+BOT_SCHEDULES: Dict[str, Dict[str, Any]] = {} 
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 
 # --- 3. 核心功能：获取动态链接 ---
 
-# 需求 1: 通用链接 (iOS/安卓) 关键字
-UNIVERSAL_COMMAND_PATTERN = r"^(地址|下载地址|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|下载链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接)$"
+# 需求 1: 通用链接
+UNIVERSAL_COMMAND_PATTERN = r"^(地址|下载地址|下载链接|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接)$"
 
-# 需求 2: 安卓专用链接 关键字
-ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|提包|安装包|安卓提包)$"
+# 需求 2: 安卓专用链接
+ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
+
+# --- ⬇️ 关键修改：拆分为两个独立的关键字列表 ⬇️ ---
+# 需求 3: 苹果重启指南
+IOS_QUIT_PATTERN = r"^(苹果大退|苹果大退重启|苹果黑屏|苹果重开)$"
+# 需求 4: 安卓重启指南
+ANDROID_QUIT_PATTERN = r"^(安卓大退|安卓重启|安卓黑屏|安卓重开|安卓大退重启|重开|卡了|黑屏)$"
+# --- ⬆️ 关键修改 ⬆️ ---
 
 # --- 辅助函数 ---
 def generate_universal_subdomain(min_len: int = 4, max_len: int = 7) -> str:
-    """(需求 1) 生成一个 4-7 位随机长度的字符串 (仅小写)"""
+    """(需求 1) 生成一个 3-7 位随机长度的字符串 (仅小写)"""
     length = random.randint(min_len, max_len)
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
 def generate_android_specific_subdomain(min_len: int = 5, max_len: int = 9) -> str:
-    """(需求 2) 生成一个 5-9 位随机长度的字符串 (仅小写)"""
+    """(需求 2) 生成一个 4-9 位随机长度的字符串 (仅小写)"""
     length = random.randint(min_len, max_len)
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
@@ -65,13 +72,7 @@ def modify_url_subdomain(url_str: str, new_sub: str) -> str:
 
 # --- 核心处理器 1 (Playwright - 通用链接) ---
 async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    (需求 1)
-    1. [Requests] 访问 API 获取 域名 A
-    2. [Playwright] 访问 域名 A 获取 域名 B
-    3. 修改 域名 B 的二级域名 (4-7位)
-    4. 发送最终 URL (保留 ? 参数)
-    """
+    """ (需求 1) - Playwright 动态链接 """
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [通用链接] 关键字，开始执行 [Playwright] 链接获取...")
 
@@ -102,7 +103,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.warning(f"发送“处理中”消息失败: {e}")
 
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/5.37.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
     
     page = None 
@@ -138,9 +139,9 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         domain_b = page.url 
         logger.info(f"步骤 2 成功: 获取到 域名 B (完整): {domain_b}")
 
-        # --- 步骤 3: 修改 域名 B 的二级域名 (4-7位) ---
+        # --- 步骤 3: 修改 域名 B 的二级域名 (3-7位) ---
         logger.info(f"步骤 3: 正在为 {domain_b} 生成 4-7 位随机二级域名...")
-        random_sub = generate_universal_subdomain() # 4-7 位
+        random_sub = generate_universal_subdomain() # 3-7 位
         final_modified_url = modify_url_subdomain(domain_b, random_sub)
         logger.info(f"步骤 3 成功: 最终 URL -> {final_modified_url}")
 
@@ -160,14 +161,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # --- 核心处理器 2 (安卓专用链接) ---
 async def get_android_specific_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    (需求 2 - 动态模板)
-    1. 收到 "安卓专用" 关键字
-    2. 查找此 Bot 专属的 APK_URL 模板
-    3. 生成 4-9 位随机字符串
-    4. 替换模板中的 *
-    5. 发送
-    """
+    """ (需求 2 - 动态模板) """
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [安卓专用] 关键字，开始生成 APK 链接...")
     
@@ -185,7 +179,7 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
         return
         
     try:
-        # 2. 生成 5-9 位随机二级域名
+        # 2. 生成 4-9 位随机二级域名
         random_sub = generate_android_specific_subdomain()
         
         # 3. 格式化 URL (替换模板中的第一个 *)
@@ -197,6 +191,35 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         logger.error(f"处理 get_android_specific_link 时发生错误: {e}")
         await update.message.reply_text(f"❌ 处理安卓链接时发生内部错误。")
+
+# --- ⬇️ 关键修改：拆分为两个独立的函数 ⬇️ ---
+
+# --- 核心处理器 3 (苹果重启指南) ---
+async def send_ios_quit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ (需求 3 - 静态回复 iOS) """
+    bot_token_end = context.application.bot.token[-4:]
+    logger.info(f"Bot {bot_token_end} 收到 [苹果大退] 关键字，发送 iOS 重启指南...")
+    
+    message = """📱 <b>苹果手机</b><br><br><b>1. 关闭App:</b> 在主屏幕上，从屏幕底部向上轻扫并在中间稍作停留，调出后台多任务界面。<br><br><b>2. 找到并关闭:</b> 向左或向右滑动卡片找到要关闭的App，然后在该App的卡片上向上轻扫。<br><br><b>3. 重新打开:</b> 返回主屏幕，点击该App图标重新打开。"""
+    
+    try:
+        await update.message.reply_html(message)
+    except Exception as e:
+        logger.error(f"发送 [苹果大退] 指南时失败: {e}")
+
+# --- 核心处理器 4 (安卓重启指南) ---
+async def send_android_quit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ (需求 4 - 静态回复 Android) """
+    bot_token_end = context.application.bot.token[-4:]
+    logger.info(f"Bot {bot_token_end} 收到 [安卓大退] 关键字，发送 Android 重启指南...")
+    
+    message = """🤖 <b>安卓手机</b><br><br><b>1. 关闭App:</b><br>   • <b>方法一:</b> 从屏幕底部向上滑动并保持，即可进入后台多任务界面。<br>   • <b>方法二:</b> 点击屏幕底部的多任务/最近应用按钮 (通常是<code>□</code>或<code>≡</code>图标)。<br><br><b>2. 找到并关闭:</b> 在后台列表中，向上滑动要关闭的App卡片。<br><br><b>3. 重新打开:</b> 返回主屏幕或应用抽屉，点击该App图标重新打开。"""
+    
+    try:
+        await update.message.reply_html(message)
+    except Exception as e:
+        logger.error(f"发送 [安卓大退] 指南时失败: {e}")
+# --- ⬆️ 关键修改 ⬆️ ---
 
 
 # --- 4. Bot 启动与停止逻辑 ---
@@ -220,9 +243,32 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
             get_android_specific_link # 调用新的安卓函数
         )
     )
+
+    # --- ⬇️ 关键修改：注册两个独立的处理器 ⬇️ ---
+    # (需求 3) 处理器
+    app_instance.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.Regex(IOS_QUIT_PATTERN),
+            send_ios_quit_guide # 调用 iOS 指南
+        )
+    )
+    # (需求 4) 处理器
+    app_instance.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.Regex(ANDROID_QUIT_PATTERN),
+            send_android_quit_guide # 调用 Android 指南
+        )
+    )
+    # --- ⬆️ 关键修改 ⬆️ ---
     
+    # --- ⬇️ 关键修改：更新 /start 消息 ⬇️ ---
     async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_html(f"🤖 Bot #{bot_index} (尾号: {token_end}) 已准备就绪。\n- 发送 `链接`、`地址` 等获取通用链接。\n- 发送 `安卓专用` 等获取 APK 链接。")
+        await update.message.reply_html(f"🤖 Bot #{bot_index} (尾号: {token_end}) 已准备就绪。\n"
+                                      f"- 发送 `链接`、`地址` 等获取通用链接。\n"
+                                      f"- 发送 `安卓专用` 等获取 APK 链接。\n"
+                                      f"- 发送 `苹果大退` 获取 iOS 重启指南。\n"
+                                      f"- 发送 `安卓大退` 获取 Android 重启指南。")
+    # --- ⬆️ 关键修改 ⬆️ ---
     
     app_instance.add_handler(CommandHandler("start", start_command))
     
@@ -232,7 +278,7 @@ app = FastAPI(title="Multi-Bot Playwright Service")
 
 # --- 6. 应用启动/关闭事件 ---
 
-# --- ⬇️ 关键修改：后台调度器 (固定时间点) ⬇️ ---
+# --- ⬇️ 后台调度器 (与之前相同) ⬇️ ---
 async def background_scheduler():
     """每60秒检查一次是否有到期的定时任务"""
     logger.info("后台调度器已启动... (每 60 秒检查一次)")
@@ -243,23 +289,18 @@ async def background_scheduler():
             now_utc = datetime.datetime.now(datetime.timezone.utc)
             current_utc_hm = now_utc.strftime("%H:%M") # 格式: "14:01"
             
-            # logger.info(f"调度器检查时间 (UTC): {current_utc_hm}") # (取消注释以进行调试)
-            
             # 遍历所有已配置的计划
             for webhook_path, schedule in BOT_SCHEDULES.items():
                 
                 # 检查当前时间是否在“待发送时间列表”中
                 if current_utc_hm in schedule["times"]:
                     
-                    # 是的，到时间了。但我们发送过了吗？
                     last_sent_time = schedule.get("last_sent")
                     should_send = False
                     
                     if last_sent_time is None: # 第一次运行，立即发送
                         should_send = True
                     else:
-                        # 检查自上次发送以来是否已过了足够长的时间（例如 > 1小时）
-                        # 这可以防止服务在 14:00 重启 3 次，导致连发 3 条消息
                         delta = now_utc - last_sent_time
                         if delta.total_seconds() > 3540: # (略小于 60 分钟)
                             should_send = True
@@ -268,21 +309,20 @@ async def background_scheduler():
                     if should_send:
                         application = BOT_APPLICATIONS.get(webhook_path)
                         if application:
-                            # --- ⬇️ 关键修复：循环发送到多个 Chat ID ⬇️ ---
-                            chat_ids_list = schedule["chat_ids"] # <-- 获取列表
+                            # 循环发送到多个 Chat ID
+                            chat_ids_list = schedule["chat_ids"] 
                             message = schedule["message"]
                             
                             logger.info(f"Bot (路径: {webhook_path}) 正在发送定时消息到 {len(chat_ids_list)} 个 Chats...")
                             
-                            for chat_id in chat_ids_list: # <-- 循环
+                            for chat_id in chat_ids_list: # 循环
                                 try:
-                                    await application.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML') # 允许 HTML 格式
+                                    await application.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML') 
                                     logger.info(f"Bot (路径: {webhook_path}) 定时消息 -> {chat_id} 发送成功。")
                                 except Exception as e:
                                     logger.error(f"Bot (路径: {webhook_path}) 发送定时消息 -> {chat_id} 失败: {e}")
                             
                             schedule["last_sent"] = now_utc # 更新“上次发送时间”
-                            # --- ⬆️ 关键修复 ⬆️ ---
                         else:
                             logger.warning(f"调度器：找不到 Bot Application 实例 (路径: {webhook_path})")
 
@@ -290,7 +330,7 @@ async def background_scheduler():
             logger.error(f"后台调度器发生严重错误: {e}")
             
         await asyncio.sleep(60) # 休息 60 秒
-# --- ⬆️ 关键修改 ⬆️ ---
+# --- ⬆️ 后台调度器 ⬆️ ---
 
 
 @app.on_event("startup")
@@ -301,7 +341,7 @@ async def startup_event():
     BOT_APPLICATIONS = {}
     BOT_API_URLS = {}
     BOT_APK_URLS = {}
-    BOT_SCHEDULES = {} # 初始化新字典
+    BOT_SCHEDULES = {} 
 
     logger.info("应用启动中... 正在查找所有 Bot 配置。")
 
@@ -341,8 +381,8 @@ async def startup_event():
             else:
                 logger.warning(f"DIAGNOSTIC: Bot #{i} 未找到 {apk_url_name}。[安卓专用链接] 功能将无法工作。")
 
-            # --- ⬇️ 关键修改：加载固定时间点配置 ⬇️ ---
-            schedule_chat_ids_str = os.getenv(f"BOT_{i}_SCHEDULE_CHAT_ID") # <-- 读取逗号分隔的字符串
+            # 3. 加载固定时间点配置
+            schedule_chat_ids_str = os.getenv(f"BOT_{i}_SCHEDULE_CHAT_ID") 
             schedule_times_str = os.getenv(f"BOT_{i}_SCHEDULE_TIMES_UTC")
             schedule_message = os.getenv(f"BOT_{i}_SCHEDULE_MESSAGE")
 
@@ -353,24 +393,22 @@ async def startup_event():
                     if not times_list:
                         raise ValueError("时间列表为空")
 
-                    # --- ⬇️ 关键修复：解析逗号分隔的 Chat ID 列表 ⬇️ ---
+                    # 解析逗号分隔的 Chat ID 列表
                     chat_ids_list = [cid.strip() for cid in schedule_chat_ids_str.split(',') if cid.strip()]
                     if not chat_ids_list:
                         raise ValueError("Chat ID 列表为空")
-                    # --- ⬆️ 关键修复 ⬆️ ---
 
                     BOT_SCHEDULES[webhook_path] = {
-                        "chat_ids": chat_ids_list, # <-- 存储 Chat ID 列表
-                        "times": times_list, # <-- 存储时间列表
+                        "chat_ids": chat_ids_list, 
+                        "times": times_list, 
                         "message": schedule_message,
-                        "last_sent": None # 第一次运行时会立即发送
+                        "last_sent": None 
                     }
                     logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已加载 [定时任务]: 在 UTC {times_list} 发送到 {len(chat_ids_list)} 个 Chat(s)")
                 except Exception as e:
                     logger.error(f"Bot #{i} 的定时任务配置错误: {e}")
             else:
                 logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 未配置定时任务。")
-            # --- ⬆️ 关键修改 ⬆️ ---
                 
             logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已创建并初始化。监听路径: /{webhook_path}")
 
@@ -438,15 +476,13 @@ async def root():
     for path, app in BOT_APPLICATIONS.items():
         schedule_info = "未配置"
         if BOT_SCHEDULES.get(path):
-            schedule_info = f"配置于 UTC {BOT_SCHEDULES[path]['times']} -> {len(BOT_SCHEDULES[path]['chat_ids'])} 个 Chat(s)" # <-- 更新状态
+            schedule_info = f"配置于 UTC {BOT_SCHEDULES[path]['times']} -> {len(BOT_SCHEDULES[path]['chat_ids'])} 个 Chat(s)" 
             
         active_bots_info[path] = {
             "token_end": app.bot.token[-4:],
             "api_url_universal": BOT_API_URLS.get(path, "未设置!"),
             "api_url_android_apk": BOT_APK_URLS.get(path, "未设置!"),
-            # --- ⬇️ 新增：在健康检查中显示定时任务状态 ⬇️ ---
             "schedule_info": schedule_info
-            # --- ⬆️ 新增 ⬆️ ---
         }
     status = {
         "status": "OK",
