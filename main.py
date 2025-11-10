@@ -38,21 +38,19 @@ UNIVERSAL_COMMAND_PATTERN = r"^(地址|下载地址|下载链接|最新地址|�
 # 需求 2: 安卓专用链接
 ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
 
-# --- ⬇️ 关键修改：拆分为两个独立的关键字列表 ⬇️ ---
 # 需求 3: 苹果重启指南
-IOS_QUIT_PATTERN = r"^(苹果大退|苹果大退重启|苹果黑屏|苹果重开)$"
+IOS_QUIT_PATTERN = r"^(苹果大退|苹果重启|苹果大退重启|苹果黑屏|苹果重开)$"
 # 需求 4: 安卓重启指南
-ANDROID_QUIT_PATTERN = r"^(安卓大退|安卓重启|安卓黑屏|安卓重开|安卓大退重启|重开|卡了|黑屏)$"
-# --- ⬆️ 关键修改 ⬆️ ---
+ANDROID_QUIT_PATTERN = r"^(安卓大退|安卓重启|安卓大退重启|安卓黑屏|安卓重开|重开|闪退|卡了|黑屏)$"
 
 # --- 辅助函数 ---
 def generate_universal_subdomain(min_len: int = 4, max_len: int = 7) -> str:
-    """(需求 1) 生成一个 3-7 位随机长度的字符串 (仅小写)"""
+    """(需求 1) 生成一个 4-7 位随机长度的字符串 (仅小写)"""
     length = random.randint(min_len, max_len)
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
 def generate_android_specific_subdomain(min_len: int = 5, max_len: int = 9) -> str:
-    """(需求 2) 生成一个 4-9 位随机长度的字符串 (仅小写)"""
+    """(需求 2) 生成一个 5-9 位随机长度的字符串 (仅小写)"""
     length = random.randint(min_len, max_len)
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
@@ -139,14 +137,14 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         domain_b = page.url 
         logger.info(f"步骤 2 成功: 获取到 域名 B (完整): {domain_b}")
 
-        # --- 步骤 3: 修改 域名 B 的二级域名 (3-7位) ---
+        # --- 步骤 3: 修改 域名 B 的二级域名 (4-7位) ---
         logger.info(f"步骤 3: 正在为 {domain_b} 生成 4-7 位随机二级域名...")
-        random_sub = generate_universal_subdomain() # 3-7 位
+        random_sub = generate_universal_subdomain() # 4-7 位
         final_modified_url = modify_url_subdomain(domain_b, random_sub)
         logger.info(f"步骤 3 成功: 最终 URL -> {final_modified_url}")
 
         # --- 步骤 4: 发送最终 URL ---
-        await update.message.reply_text(f"✅ 您的专属通用下载链接已生成：\n{final_modified_url}")
+        await update.message.reply_text(f"✅ 您的专属通用链接已生成：\n{final_modified_url}")
 
     except Exception as e:
         logger.error(f"处理 get_universal_link (Playwright) 时发生错误: {e}")
@@ -179,7 +177,7 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
         return
         
     try:
-        # 2. 生成 4-9 位随机二级域名
+        # 2. 生成 5-9 位随机二级域名
         random_sub = generate_android_specific_subdomain()
         
         # 3. 格式化 URL (替换模板中的第一个 *)
@@ -192,7 +190,7 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
         logger.error(f"处理 get_android_specific_link 时发生错误: {e}")
         await update.message.reply_text(f"❌ 处理安卓链接时发生内部错误。")
 
-# --- ⬇️ 关键修改：拆分为两个独立的函数 ⬇️ ---
+# --- ⬇️ 关键修复：删除所有 <br> 标签，使用真正的换行符 ⬇️ ---
 
 # --- 核心处理器 3 (苹果重启指南) ---
 async def send_ios_quit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -200,7 +198,13 @@ async def send_ios_quit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [苹果大退] 关键字，发送 iOS 重启指南...")
     
-    message = """📱 <b>苹果手机</b><br><br><b>1. 关闭App:</b> 在主屏幕上，从屏幕底部向上轻扫并在中间稍作停留，调出后台多任务界面。<br><br><b>2. 找到并关闭:</b> 向左或向右滑动卡片找到要关闭的App，然后在该App的卡片上向上轻扫。<br><br><b>3. 重新打开:</b> 返回主屏幕，点击该App图标重新打开。"""
+    message = """📱 <b>苹果手机</b>
+
+<b>1. 关闭App:</b> 在主屏幕上，从屏幕底部向上轻扫并在中间稍作停留，调出后台多任务界面。
+
+<b>2. 找到并关闭:</b> 向左或向右滑动卡片找到要关闭的App，然后在该App的卡片上向上轻扫。
+
+<b>3. 重新打开:</b> 返回主屏幕，点击该App图标重新打开。"""
     
     try:
         await update.message.reply_html(message)
@@ -213,13 +217,21 @@ async def send_android_quit_guide(update: Update, context: ContextTypes.DEFAULT_
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [安卓大退] 关键字，发送 Android 重启指南...")
     
-    message = """🤖 <b>安卓手机</b><br><br><b>1. 关闭App:</b><br>   • <b>方法一:</b> 从屏幕底部向上滑动并保持，即可进入后台多任务界面。<br>   • <b>方法二:</b> 点击屏幕底部的多任务/最近应用按钮 (通常是<code>□</code>或<code>≡</code>图标)。<br><br><b>2. 找到并关闭:</b> 在后台列表中，向上滑动要关闭的App卡片。<br><br><b>3. 重新打开:</b> 返回主屏幕或应用抽屉，点击该App图标重新打开。"""
+    message = """🤖 <b>安卓手机</b>
+
+<b>1. 关闭App:</b>
+   • <b>方法一:</b> 从屏幕底部向上滑动并保持，即可进入后台多任务界面。
+   • <b>方法二:</b> 点击屏幕底部的多任务/最近应用按钮 (通常是<code>□</code>或<code>≡</code>图标)。
+
+<b>2. 找到并关闭:</b> 在后台列表中，向上滑动要关闭的App卡片。
+
+<b>3. 重新打开:</b> 返回主屏幕或应用抽屉，点击该App图标重新打开。"""
     
     try:
         await update.message.reply_html(message)
     except Exception as e:
         logger.error(f"发送 [安卓大退] 指南时失败: {e}")
-# --- ⬆️ 关键修改 ⬆️ ---
+# --- ⬆️ 关键修复 ⬆️ ---
 
 
 # --- 4. Bot 启动与停止逻辑 ---
@@ -244,7 +256,6 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
         )
     )
 
-    # --- ⬇️ 关键修改：注册两个独立的处理器 ⬇️ ---
     # (需求 3) 处理器
     app_instance.add_handler(
         MessageHandler(
@@ -259,16 +270,13 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
             send_android_quit_guide # 调用 Android 指南
         )
     )
-    # --- ⬆️ 关键修改 ⬆️ ---
     
-    # --- ⬇️ 关键修改：更新 /start 消息 ⬇️ ---
     async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_html(f"🤖 Bot #{bot_index} (尾号: {token_end}) 已准备就绪。\n"
                                       f"- 发送 `链接`、`地址` 等获取通用链接。\n"
                                       f"- 发送 `安卓专用` 等获取 APK 链接。\n"
                                       f"- 发送 `苹果大退` 获取 iOS 重启指南。\n"
                                       f"- 发送 `安卓大退` 获取 Android 重启指南。")
-    # --- ⬆️ 关键修改 ⬆️ ---
     
     app_instance.add_handler(CommandHandler("start", start_command))
     
