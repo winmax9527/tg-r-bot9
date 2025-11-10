@@ -280,7 +280,7 @@ async def send_ios_browser_guide(update: Update, context: ContextTypes.DEFAULT_T
 
 <b>1. 打开浏览器:</b> (例如 Safari)。
 
-<b>2. 点击地址栏:</b> 点击屏幕顶部的网址栏。
+<b>2. 点击地址栏:</b> 点击屏幕顶部或底部的网址栏。
 
 <b>3. 选择“网站设置”:</b> 在弹出的选项中，找到并点击“网站设置”或“大小” (如果显示 <code>AA</code> 图标)。
 
