@@ -41,16 +41,29 @@ ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(安卓专用|安卓专用链接|安卓提
 # 需求 3: 苹果重启指南
 IOS_QUIT_PATTERN = r"^(苹果大退|苹果重启|苹果大退重启|苹果黑屏|苹果重开)$"
 # 需求 4: 安卓重启指南
-ANDROID_QUIT_PATTERN = r"^(安卓大退|安卓重启|安卓大退重启|安卓黑屏|安卓重开|重开|闪退|卡了|黑屏)$"
+ANDROID_QUIT_PATTERN = r"^(安卓大退|安卓重启|安卓大退重启|安卓黑屏|安卓重开|大退|重开|闪退|卡了|黑屏)$"
+
+# 需求 5: 安卓浏览器指
+ANDROID_BROWSER_PATTERN = r"^(安卓浏览器手机版|安卓桌面版|浏览器设置)$"
+
+# 需求 6: 苹果浏览器指南
+IOS_BROWSER_PATTERN = r"^(苹果浏览器手机版|苹果浏览器|苹果桌面版)$"
+
+# 需求 7: 安卓窗口上限指南
+ANDROID_TAB_LIMIT_PATTERN = r"^(安卓窗口上限|窗口上限|标签上限)$"
+
+# --- ⬇️ 新增：需求 8: 苹果窗口上限指南 ⬇️ ---
+IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
+# --- ⬆️ 新增 ⬆️ ---
 
 # --- 辅助函数 ---
 def generate_universal_subdomain(min_len: int = 4, max_len: int = 7) -> str:
-    """(需求 1) 生成一个 4-7 位随机长度的字符串 (仅小写)"""
+    """(需求 1) 生成一个 3-7 位随机长度的字符串 (仅小写)"""
     length = random.randint(min_len, max_len)
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
 def generate_android_specific_subdomain(min_len: int = 5, max_len: int = 9) -> str:
-    """(需求 2) 生成一个 5-9 位随机长度的字符串 (仅小写)"""
+    """(需求 2) 生成一个 4-9 位随机长度的字符串 (仅小写)"""
     length = random.randint(min_len, max_len)
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
@@ -137,14 +150,14 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         domain_b = page.url 
         logger.info(f"步骤 2 成功: 获取到 域名 B (完整): {domain_b}")
 
-        # --- 步骤 3: 修改 域名 B 的二级域名 (4-7位) ---
-        logger.info(f"步骤 3: 正在为 {domain_b} 生成 4-7 位随机二级域名...")
-        random_sub = generate_universal_subdomain() # 4-7 位
+        # --- 步骤 3: 修改 域名 B 的二级域名 (3-7位) ---
+        logger.info(f"步骤 3: 正在为 {domain_b} 生成 3-7 位随机二级域名...")
+        random_sub = generate_universal_subdomain() # 3-7 位
         final_modified_url = modify_url_subdomain(domain_b, random_sub)
         logger.info(f"步骤 3 成功: 最终 URL -> {final_modified_url}")
 
         # --- 步骤 4: 发送最终 URL ---
-        await update.message.reply_text(f"✅ 您的专属通用链接已生成：\n{final_modified_url}")
+        await update.message.reply_text(f"✅ 您的专属通用下载链接已生成：\n{final_modified_url}")
 
     except Exception as e:
         logger.error(f"处理 get_universal_link (Playwright) 时发生错误: {e}")
@@ -177,7 +190,7 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
         return
         
     try:
-        # 2. 生成 5-9 位随机二级域名
+        # 2. 生成 4-9 位随机二级域名
         random_sub = generate_android_specific_subdomain()
         
         # 3. 格式化 URL (替换模板中的第一个 *)
@@ -189,8 +202,6 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         logger.error(f"处理 get_android_specific_link 时发生错误: {e}")
         await update.message.reply_text(f"❌ 处理安卓链接时发生内部错误。")
-
-# --- ⬇️ 关键修复：删除所有 <br> 标签，使用真正的换行符 ⬇️ ---
 
 # --- 核心处理器 3 (苹果重启指南) ---
 async def send_ios_quit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -231,7 +242,104 @@ async def send_android_quit_guide(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_html(message)
     except Exception as e:
         logger.error(f"发送 [安卓大退] 指南时失败: {e}")
-# --- ⬆️ 关键修复 ⬆️ ---
+
+# --- 核心处理器 5 (安卓浏览器指南) ---
+async def send_android_browser_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ (需求 5 - 静态回复 Android 浏览器) """
+    bot_token_end = context.application.bot.token[-4:]
+    logger.info(f"Bot {bot_token_end} 收到 [安卓浏览器] 关键字，发送浏览器指南...")
+    
+    message = """🤖 <b>安卓手机浏览器设置为手机版模式步骤</b>
+
+核心操作就是找到并关闭“桌面版”模式。
+
+<b>1. 打开浏览器:</b> 启动您手机自带的浏览器 App (如“华为浏览器”、“小米浏览器”)。
+
+<b>2. 进入菜单:</b> 点击浏览器界面右下角或右上角的三条横线(<code>≡</code>)或三个点图标(<code>⋮</code>)。
+
+<b>3. 关闭“桌面模式”:</b> 在弹出的菜单列表中，找到“桌面版”、“桌面网站”或“电脑版”选项。
+
+<b>4. 取消勾选:</b> 确保该选项<b>没有</b>被勾选 (开关处于关闭状态)。
+
+<b>5. 刷新页面:</b> 页面会自动刷新，恢复为手机版的 UA 标识和显示界面。"""
+    
+    try:
+        await update.message.reply_html(message)
+    except Exception as e:
+        logger.error(f"发送 [安卓浏览器] 指南时失败: {e}")
+
+# --- 核心处理器 6 (苹果浏览器指南) ---
+async def send_ios_browser_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ (需求 6 - 静态回复 Apple 浏览器) """
+    bot_token_end = context.application.bot.token[-4:]
+    logger.info(f"Bot {bot_token_end} 收到 [苹果浏览器] 关键字，发送浏览器指南...")
+    
+    message = """📱 <b>苹果手机浏览器设置为手机版移动网站步骤</b>
+
+在苹果设备上，使用 Safari 或其他浏览器时：
+
+<b>1. 打开浏览器:</b> (例如 Safari)。
+
+<b>2. 点击地址栏:</b> 点击屏幕顶部的网址栏。
+
+<b>3. 选择“网站设置”:</b> 在弹出的选项中，找到并点击“网站设置”或“大小” (如果显示 <code>AA</code> 图标)。
+
+<b>4. 查找“请求桌面网站”:</b> 在菜单中，找到“请求桌面网站”选项。
+
+<b>5. 取消勾选/关闭:</b> 确保该选项处于<b>未勾选</b>或<b>关闭</b>状态。
+
+<b>6. 刷新页面:</b> 页面会自动加载手机版界面。"""
+    
+    try:
+        await update.message.reply_html(message)
+    except Exception as e:
+        logger.error(f"发送 [苹果浏览器] 指南时失败: {e}")
+        
+# --- 核心处理器 7 (安卓窗口上限指南) ---
+async def send_android_tab_limit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ (需求 7 - 静态回复 Android 窗口上限) """
+    bot_token_end = context.application.bot.token[-4:]
+    logger.info(f"Bot {bot_token_end} 收到 [安卓窗口上限] 关键字，发送窗口指南...")
+    
+    message = """🤖 <b>安卓/平板浏览器窗口上限解决步骤</b>
+
+<b>1. 打开浏览器:</b> 启动您使用的浏览器 App (如 Chrome、华为浏览器、小米浏览器等)。
+
+<b>2. 点击标签页图标:</b> 通常在地址栏旁边，会有一个显示数字的小方块图标 (例如 <code>100+</code> 或一个数字)，表示当前打开的标签页数量。
+
+<b>3. 管理标签页:</b> 进入标签页管理界面。
+
+<b>4. 批量关闭:</b> 寻找“关闭所有标签页”或类似的选项。多数浏览器在右上角或菜单中提供此功能。
+
+<b>5. 或手动关闭:</b> 您也可以通过向上滑动或点击每个标签页的“x”按钮逐个关闭。"""
+    
+    try:
+        await update.message.reply_html(message)
+    except Exception as e:
+        logger.error(f"发送 [安卓窗口上限] 指南时失败: {e}")
+
+# --- ⬇️ 新增：核心处理器 8 (苹果窗口上限指南) ⬇️ ---
+async def send_ios_tab_limit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ (需求 8 - 静态回复 Apple 窗口上限) """
+    bot_token_end = context.application.bot.token[-4:]
+    logger.info(f"Bot {bot_token_end} 收到 [苹果窗口上限] 关键字，发送窗口指南...")
+    
+    # 完全按照您截图的格式排版
+    message = """📱 <b>苹果/平板浏览器窗口上限解决步骤</b>
+
+<b>1. 打开 Safari 浏览器。</b>
+
+<b>2. 点击标签页图标:</b> 在屏幕底部 (iPhone 横屏或 iPad) 或右下角 (iPhone 竖屏底部) 找到两个重叠方块的图标。
+
+<b>3. 批量关闭:</b> <b>长按</b>该标签页图标，会弹出一个菜单。选择“关闭[数字]个标签页”或“关闭所有标签页”。
+
+<b>4. 或手动关闭:</b> 进入标签页管理界面后，向左滑动每个标签页，或者点击左上角的“X”来关闭。"""
+    
+    try:
+        await update.message.reply_html(message)
+    except Exception as e:
+        logger.error(f"发送 [苹果窗口上限] 指南时失败: {e}")
+# --- ⬆️ 新增 ⬆️ ---
 
 
 # --- 4. Bot 启动与停止逻辑 ---
@@ -270,13 +378,53 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
             send_android_quit_guide # 调用 Android 指南
         )
     )
+
+    # (需求 5) 处理器
+    app_instance.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.Regex(ANDROID_BROWSER_PATTERN),
+            send_android_browser_guide # 调用安卓浏览器指南
+        )
+    )
     
+    # (需求 6) 处理器
+    app_instance.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.Regex(IOS_BROWSER_PATTERN),
+            send_ios_browser_guide # 调用苹果浏览器指南
+        )
+    )
+    
+    # (需求 7) 处理器
+    app_instance.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.Regex(ANDROID_TAB_LIMIT_PATTERN),
+            send_android_tab_limit_guide # 调用安卓窗口上限指南
+        )
+    )
+    
+    # --- ⬇️ 新增：(需求 8) 处理器 ⬇️ ---
+    app_instance.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.Regex(IOS_TAB_LIMIT_PATTERN),
+            send_ios_tab_limit_guide # 调用苹果窗口上限指南
+        )
+    )
+    # --- ⬆️ 新增 ⬆️ ---
+    
+    
+    # --- ⬇️ 关键修改：更新 /start 消息 ⬇️ ---
     async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_html(f"🤖 Bot #{bot_index} (尾号: {token_end}) 已准备就绪。\n"
                                       f"- 发送 `链接`、`地址` 等获取通用链接。\n"
                                       f"- 发送 `安卓专用` 等获取 APK 链接。\n"
                                       f"- 发送 `苹果大退` 获取 iOS 重启指南。\n"
-                                      f"- 发送 `安卓大退` 获取 Android 重启指南。")
+                                      f"- 发送 `安卓大退` 获取 Android 重启指南。\n"
+                                      f"- 发送 `安卓浏览器手机版` 获取安卓浏览器设置指南。\n"
+                                      f"- 发送 `苹果浏览器手机版` 获取苹果浏览器设置指南。\n"
+                                      f"- 发送 `安卓窗口上限` 获取安卓窗口管理指南。\n"
+                                      f"- 发送 `苹果窗口上限` 获取苹果窗口管理指南。")
+    # --- ⬆️ 关键修改 ⬆️ ---
     
     app_instance.add_handler(CommandHandler("start", start_command))
     
