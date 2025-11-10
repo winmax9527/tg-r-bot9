@@ -45,34 +45,43 @@ IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
 
 # --- 辅助函数 ---
 
-# --- ⬇️ 关键修复：智能安全检查 ⬇️ ---
+# --- ⬇️ 关键修复：真正的智能安全检查 ⬇️ ---
 def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
     """
-    智能安全检查：
-    检查此消息的 Chat ID (及其 -100 变体) 是否在当前 Bot 的“白名单”上。
+    真正的智能安全检查：
+    检查此消息的 Chat ID (及其变体) 是否在当前 Bot 的“白名单”上。
     """
     current_app = context.application
     allowed_list: List[str] = []
     
-    # 查找当前 Bot 对应的 webhook_path
+    # 1. 查找当前 Bot 的白名单
     for path, app_instance in BOT_APPLICATIONS.items():
         if app_instance is current_app:
-            # 获取这个 Bot 的白名单列表
             allowed_list = BOT_ALLOWED_CHATS.get(path, [])
             break
             
-    # 将传入的 chat_id (int) 转换为 str
-    chat_id_str_short = str(chat_id) # 这可能是 "短" ID (例如: -466...)
-    
-    # 自动创建 "长" ID (例如: -100466...)
-    chat_id_str_long = f"-100{chat_id_str_short.lstrip('-')}" if chat_id_str_short.startswith('-') else chat_id_str_short
+    # 2. 创建所有可能的 ID 变体
+    chat_id_str = str(chat_id)
+    possible_ids_to_check = {chat_id_str} # 使用集合避免重复
 
-    # 只要 "短" ID 或 "长" ID *任何一个* 在白名单中，就允许
-    if chat_id_str_short in allowed_list or chat_id_str_long in allowed_list:
-        return True # 在白名单中，允许
-    
-    # 如果两个都不在，记录警告并拒绝
-    logger.warning(f"Bot (尾号: {current_app.bot.token[-4:]}) 收到来自 [未授权] Chat ID: {chat_id_str_short} (已检查 {chat_id_str_long}) 的请求。已忽略。")
+    if chat_id_str.startswith("-100"):
+        # 这是一个 "长" ID (e.g., -10012345)
+        # 我们也应该检查它的 "短" 变体 (e.g., -12345)
+        short_id = f"-{chat_id_str[4:]}"
+        possible_ids_to_check.add(short_id)
+    elif chat_id_str.startswith("-"):
+        # 这是一个 "短" ID (e.g., -12345)
+        # 我们也应该检查它的 "长" 变体 (e.g., -10012345)
+        long_id = f"-100{chat_id_str[1:]}"
+        possible_ids_to_check.add(long_id)
+
+    # 3. 检查任何一个变体是否存在于白名单中
+    for check_id in possible_ids_to_check:
+        if check_id in allowed_list:
+            return True # 匹配成功！
+
+    # 4. 如果所有变体都失败了，则拒绝
+    logger.warning(f"Bot (尾号: {current_app.bot.token[-4:]}) 收到来自 [未授权] Chat ID: {chat_id_str} (已检查 {possible_ids_to_check}) 的请求。已忽略。")
     return False
 # --- ⬆️ 关键修复 ⬆️ ---
 
@@ -636,7 +645,7 @@ async def startup_event():
             else:
                 logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 未配置定时任务。")
 
-            # --- ⬇️ 智能安全白名单 (重新加入) ⬇️ ---
+            # --- ⬇️ 智能安全白名单 ⬇️ ---
             allowed_chats_name = f"BOT_{i}_ALLOWED_CHAT_IDS"
             allowed_chats_str = os.getenv(allowed_chats_name)
             if allowed_chats_str:
@@ -645,7 +654,7 @@ async def startup_event():
                 logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已加载 [安全白名单]: 允许 {len(chat_ids_list)} 个 Chat(s)")
             else:
                 logger.warning(f"DIAGNOSTIC: Bot #{i} 未找到 {allowed_chats_name}。此 Bot 将 [不会] 响应任何群组或私聊的指令。")
-            # --- ⬆️ 智能安全白名单 (重新加入) ⬆️ ---
+            # --- ⬆️ 智能安全白名单 ⬆️ ---
                 
             logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已创建并初始化。监听路径: /{webhook_path}")
 
