@@ -198,7 +198,7 @@ async def send_ios_quit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [苹果大退] 关键字，发送 iOS 重启指南...")
     
-    message = """📱 <b>苹果手机</b>
+    message = """📱 <b>苹果手机大退重启步骤</b>
 
 <b>1. 关闭App:</b> 在主屏幕上，从屏幕底部向上轻扫并在中间稍作停留，调出后台多任务界面。
 
@@ -217,7 +217,7 @@ async def send_android_quit_guide(update: Update, context: ContextTypes.DEFAULT_
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [安卓大退] 关键字，发送 Android 重启指南...")
     
-    message = """🤖 <b>安卓手机</b>
+    message = """🤖 <b>安卓手机大退重启步骤</b>
 
 <b>1. 关闭App:</b>
    • <b>方法一:</b> 从屏幕底部向上滑动并保持，即可进入后台多任务界面。
