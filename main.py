@@ -27,45 +27,73 @@ BOT_APPLICATIONS: Dict[str, Application] = {}
 BOT_API_URLS: Dict[str, str] = {}
 BOT_APK_URLS: Dict[str, str] = {}
 BOT_SCHEDULES: Dict[str, Dict[str, Any]] = {} 
+BOT_ALLOWED_CHATS: Dict[str, List[str]] = {} # <-- 安全白名单
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 
 # --- 3. 核心功能：获取动态链接 ---
 
-# 需求 1: 通用链接
+# 需求 1: 通用链接 (您修改后的)
 UNIVERSAL_COMMAND_PATTERN = r"^(地址|下载地址|下载链接|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接)$"
-
-# 需求 2: 安卓专用链接
+# 需求 2: 安卓专用链接 (您修改后的)
 ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
-
-# 需求 3: 苹果重启指南
+# 需求 3: 苹果重启指南 (您修改后的)
 IOS_QUIT_PATTERN = r"^(苹果大退|苹果重启|苹果大退重启|苹果黑屏|苹果重开)$"
-# 需求 4: 安卓重启指南
+# 需求 4: 安卓重启指南 (您修改后的)
 ANDROID_QUIT_PATTERN = r"^(安卓大退|安卓重启|安卓大退重启|安卓黑屏|安卓重开|大退|重开|闪退|卡了|黑屏)$"
-
-# 需求 5: 安卓浏览器指
+# 需求 5: 安卓浏览器指南 (您修改后的)
 ANDROID_BROWSER_PATTERN = r"^(安卓浏览器手机版|安卓桌面版|浏览器设置)$"
-
-# 需求 6: 苹果浏览器指南
+# 需求 6: 苹果浏览器指南 (您修改后的)
 IOS_BROWSER_PATTERN = r"^(苹果浏览器手机版|苹果浏览器|苹果桌面版)$"
-
-# 需求 7: 安卓窗口上限指南
+# 需求 7: 安卓窗口上限指南 (您修改后的)
 ANDROID_TAB_LIMIT_PATTERN = r"^(安卓窗口上限|窗口上限|标签上限)$"
-
-# --- ⬇️ 新增：需求 8: 苹果窗口上限指南 ⬇️ ---
+# 需求 8: 苹果窗口上限指南 (您修改后的)
 IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
-# --- ⬆️ 新增 ⬆️ ---
+
 
 # --- 辅助函数 ---
-def generate_universal_subdomain(min_len: int = 4, max_len: int = 7) -> str:
-    """(需求 1) 生成一个 3-7 位随机长度的字符串 (仅小写)"""
-    length = random.randint(min_len, max_len)
-    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
-def generate_android_specific_subdomain(min_len: int = 5, max_len: int = 9) -> str:
-    """(需求 2) 生成一个 4-9 位随机长度的字符串 (仅小写)"""
+# --- ⬇️ 安全检查辅助函数 (重新加入) ⬇️ ---
+def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
+    """
+    安全检查：检查此消息的 Chat ID 是否在当前 Bot 的“白名单”上。
+    """
+    current_app = context.application
+    allowed_list: List[str] = []
+    
+    # 查找当前 Bot 对应的 webhook_path
+    for path, app_instance in BOT_APPLICATIONS.items():
+        if app_instance is current_app:
+            # 获取这个 Bot 的白名单列表
+            allowed_list = BOT_ALLOWED_CHATS.get(path, [])
+            break
+            
+    # 将传入的 chat_id (int) 转换为 str
+    chat_id_str = str(chat_id)
+    
+    if chat_id_str not in allowed_list:
+        # 如果不在白名单中，记录警告并拒绝
+        logger.warning(f"Bot (尾号: {current_app.bot.token[-4:]}) 收到来自 [未授权] Chat ID: {chat_id_str} 的请求。已忽略。")
+        return False
+    
+    # 在白名单中，允许
+    return True
+# --- ⬆️ 安全检查辅助函数 (重新加入) ⬆️ ---
+
+
+# --- ⬇️ 您修改后的 (4-7 位) ⬇️ ---
+def generate_universal_subdomain(min_len: int = 4, max_len: int = 7) -> str:
+    """(需求 1) 生成一个 4-7 位随机长度的字符串 (仅小写)"""
     length = random.randint(min_len, max_len)
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
+# --- ⬆️ 您修改后的 ⬆️ ---
+
+# --- ⬇️ 您修改后的 (5-9 位) ⬇️ ---
+def generate_android_specific_subdomain(min_len: int = 5, max_len: int = 9) -> str:
+    """(需求 2) 生成一个 5-9 位随机长度的字符串 (仅小写)"""
+    length = random.randint(min_len, max_len)
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
+# --- ⬆️ 您修改后的 ⬆️ ---
 
 def modify_url_subdomain(url_str: str, new_sub: str) -> str:
     """替换 URL 的二级域名"""
@@ -84,6 +112,12 @@ def modify_url_subdomain(url_str: str, new_sub: str) -> str:
 # --- 核心处理器 1 (Playwright - 通用链接) ---
 async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 1) - Playwright 动态链接 """
+    
+    # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+    if not update.message or not is_chat_allowed(context, update.message.chat_id):
+        return # 不在白名单，立即停止
+    # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [通用链接] 关键字，开始执行 [Playwright] 链接获取...")
 
@@ -107,7 +141,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ 服务配置错误：未找到此 Bot 的 API 地址。")
         return
 
-    # 3. 发送“处理中”提示
+    # 3. 发送“处理中”提示 (您修改后的)
     try:
         await update.message.reply_text("正在为您获取专属通用下载链接，请稍候 ...")
     except Exception as e:
@@ -150,13 +184,13 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         domain_b = page.url 
         logger.info(f"步骤 2 成功: 获取到 域名 B (完整): {domain_b}")
 
-        # --- 步骤 3: 修改 域名 B 的二级域名 (3-7位) ---
-        logger.info(f"步骤 3: 正在为 {domain_b} 生成 3-7 位随机二级域名...")
-        random_sub = generate_universal_subdomain() # 3-7 位
+        # --- 步骤 3: 修改 域名 B 的二级域名 (您修改后的 4-7位) ---
+        logger.info(f"步骤 3: 正在为 {domain_b} 生成 4-7 位随机二级域名...")
+        random_sub = generate_universal_subdomain() # 4-7 位
         final_modified_url = modify_url_subdomain(domain_b, random_sub)
         logger.info(f"步骤 3 成功: 最终 URL -> {final_modified_url}")
 
-        # --- 步骤 4: 发送最终 URL ---
+        # --- 步骤 4: 发送最终 URL (您修改后的) ---
         await update.message.reply_text(f"✅ 您的专属通用下载链接已生成：\n{final_modified_url}")
 
     except Exception as e:
@@ -173,6 +207,12 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # --- 核心处理器 2 (安卓专用链接) ---
 async def get_android_specific_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 2 - 动态模板) """
+
+    # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+    if not update.message or not is_chat_allowed(context, update.message.chat_id):
+        return # 不在白名单，立即停止
+    # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [安卓专用] 关键字，开始生成 APK 链接...")
     
@@ -190,13 +230,13 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
         return
         
     try:
-        # 2. 生成 4-9 位随机二级域名
+        # 2. 生成 4-9 位随机二级域名 (您修改后的 5-9 位)
         random_sub = generate_android_specific_subdomain()
         
         # 3. 格式化 URL (替换模板中的第一个 *)
         final_url = apk_template.replace("*", random_sub, 1)
         
-        # 4. 发送
+        # 4. 发送 (您修改后的)
         await update.message.reply_text(f"✅ 您的专属安卓专用下载链接已生成：\n{final_url}")
         
     except Exception as e:
@@ -206,9 +246,16 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
 # --- 核心处理器 3 (苹果重启指南) ---
 async def send_ios_quit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 3 - 静态回复 iOS) """
+    
+    # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+    if not update.message or not is_chat_allowed(context, update.message.chat_id):
+        return # 不在白名单，立即停止
+    # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [苹果大退] 关键字，发送 iOS 重启指南...")
     
+    # (您修改后的)
     message = """📱 <b>苹果手机大退重启步骤</b>
 
 <b>1. 关闭App:</b> 在主屏幕上，从屏幕底部向上轻扫并在中间稍作停留，调出后台多任务界面。
@@ -225,9 +272,16 @@ async def send_ios_quit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE
 # --- 核心处理器 4 (安卓重启指南) ---
 async def send_android_quit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 4 - 静态回复 Android) """
+    
+    # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+    if not update.message or not is_chat_allowed(context, update.message.chat_id):
+        return # 不在白名单，立即停止
+    # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [安卓大退] 关键字，发送 Android 重启指南...")
     
+    # (您修改后的)
     message = """🤖 <b>安卓手机大退重启步骤</b>
 
 <b>1. 关闭App:</b>
@@ -246,9 +300,16 @@ async def send_android_quit_guide(update: Update, context: ContextTypes.DEFAULT_
 # --- 核心处理器 5 (安卓浏览器指南) ---
 async def send_android_browser_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 5 - 静态回复 Android 浏览器) """
+    
+    # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+    if not update.message or not is_chat_allowed(context, update.message.chat_id):
+        return # 不在白名单，立即停止
+    # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [安卓浏览器] 关键字，发送浏览器指南...")
     
+    # (您修改后的)
     message = """🤖 <b>安卓手机浏览器设置为手机版模式步骤</b>
 
 核心操作就是找到并关闭“桌面版”模式。
@@ -271,9 +332,16 @@ async def send_android_browser_guide(update: Update, context: ContextTypes.DEFAU
 # --- 核心处理器 6 (苹果浏览器指南) ---
 async def send_ios_browser_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 6 - 静态回复 Apple 浏览器) """
+    
+    # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+    if not update.message or not is_chat_allowed(context, update.message.chat_id):
+        return # 不在白名单，立即停止
+    # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [苹果浏览器] 关键字，发送浏览器指南...")
     
+    # (您修改后的)
     message = """📱 <b>苹果手机浏览器设置为手机版移动网站步骤</b>
 
 在苹果设备上，使用 Safari 或其他浏览器时：
@@ -298,9 +366,16 @@ async def send_ios_browser_guide(update: Update, context: ContextTypes.DEFAULT_T
 # --- 核心处理器 7 (安卓窗口上限指南) ---
 async def send_android_tab_limit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 7 - 静态回复 Android 窗口上限) """
+    
+    # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+    if not update.message or not is_chat_allowed(context, update.message.chat_id):
+        return # 不在白名单，立即停止
+    # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [安卓窗口上限] 关键字，发送窗口指南...")
     
+    # (您修改后的)
     message = """🤖 <b>安卓/平板浏览器窗口上限解决步骤</b>
 
 <b>1. 打开浏览器:</b> 启动您使用的浏览器 App (如 Chrome、华为浏览器、小米浏览器等)。
@@ -318,13 +393,19 @@ async def send_android_tab_limit_guide(update: Update, context: ContextTypes.DEF
     except Exception as e:
         logger.error(f"发送 [安卓窗口上限] 指南时失败: {e}")
 
-# --- ⬇️ 新增：核心处理器 8 (苹果窗口上限指南) ⬇️ ---
+# --- 核心处理器 8 (苹果窗口上限指南) ---
 async def send_ios_tab_limit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 8 - 静态回复 Apple 窗口上限) """
+    
+    # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+    if not update.message or not is_chat_allowed(context, update.message.chat_id):
+        return # 不在白名单，立即停止
+    # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [苹果窗口上限] 关键字，发送窗口指南...")
     
-    # 完全按照您截图的格式排版
+    # (您修改后的)
     message = """📱 <b>苹果/平板浏览器窗口上限解决步骤</b>
 
 <b>1. 打开 Safari 浏览器。</b>
@@ -339,7 +420,6 @@ async def send_ios_tab_limit_guide(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_html(message)
     except Exception as e:
         logger.error(f"发送 [苹果窗口上限] 指南时失败: {e}")
-# --- ⬆️ 新增 ⬆️ ---
 
 
 # --- 4. Bot 启动与停止逻辑 ---
@@ -352,7 +432,7 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
     app_instance.add_handler(
         MessageHandler(
             filters.TEXT & filters.Regex(UNIVERSAL_COMMAND_PATTERN), 
-            get_universal_link # 调用 Playwright 函数
+            get_universal_link
         )
     )
     
@@ -360,7 +440,7 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
     app_instance.add_handler(
         MessageHandler(
             filters.TEXT & filters.Regex(ANDROID_SPECIFIC_COMMAND_PATTERN),
-            get_android_specific_link # 调用新的安卓函数
+            get_android_specific_link
         )
     )
 
@@ -368,14 +448,14 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
     app_instance.add_handler(
         MessageHandler(
             filters.TEXT & filters.Regex(IOS_QUIT_PATTERN),
-            send_ios_quit_guide # 调用 iOS 指南
+            send_ios_quit_guide
         )
     )
     # (需求 4) 处理器
     app_instance.add_handler(
         MessageHandler(
             filters.TEXT & filters.Regex(ANDROID_QUIT_PATTERN),
-            send_android_quit_guide # 调用 Android 指南
+            send_android_quit_guide
         )
     )
 
@@ -383,7 +463,7 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
     app_instance.add_handler(
         MessageHandler(
             filters.TEXT & filters.Regex(ANDROID_BROWSER_PATTERN),
-            send_android_browser_guide # 调用安卓浏览器指南
+            send_android_browser_guide
         )
     )
     
@@ -391,7 +471,7 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
     app_instance.add_handler(
         MessageHandler(
             filters.TEXT & filters.Regex(IOS_BROWSER_PATTERN),
-            send_ios_browser_guide # 调用苹果浏览器指南
+            send_ios_browser_guide
         )
     )
     
@@ -399,22 +479,27 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
     app_instance.add_handler(
         MessageHandler(
             filters.TEXT & filters.Regex(ANDROID_TAB_LIMIT_PATTERN),
-            send_android_tab_limit_guide # 调用安卓窗口上限指南
+            send_android_tab_limit_guide
         )
     )
     
-    # --- ⬇️ 新增：(需求 8) 处理器 ⬇️ ---
+    # (需求 8) 处理器
     app_instance.add_handler(
         MessageHandler(
             filters.TEXT & filters.Regex(IOS_TAB_LIMIT_PATTERN),
-            send_ios_tab_limit_guide # 调用苹果窗口上限指南
+            send_ios_tab_limit_guide
         )
     )
-    # --- ⬆️ 新增 ⬆️ ---
     
     
-    # --- ⬇️ 关键修改：更新 /start 消息 ⬇️ ---
     async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        
+        # --- ⬇️ 安全检查 (重新加入) ⬇️ ---
+        if not update.message or not is_chat_allowed(context, update.message.chat_id):
+            return # 不在白名单，立即停止
+        # --- ⬆️ 安全检查 (重新加入) ⬆️ ---
+
+        # (您修改后的 /start 消息)
         await update.message.reply_html(f"🤖 Bot #{bot_index} (尾号: {token_end}) 已准备就绪。\n"
                                       f"- 发送 `链接`、`地址` 等获取通用链接。\n"
                                       f"- 发送 `安卓专用` 等获取 APK 链接。\n"
@@ -424,7 +509,6 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
                                       f"- 发送 `苹果浏览器手机版` 获取苹果浏览器设置指南。\n"
                                       f"- 发送 `安卓窗口上限` 获取安卓窗口管理指南。\n"
                                       f"- 发送 `苹果窗口上限` 获取苹果窗口管理指南。")
-    # --- ⬆️ 关键修改 ⬆️ ---
     
     app_instance.add_handler(CommandHandler("start", start_command))
     
@@ -438,47 +522,43 @@ app = FastAPI(title="Multi-Bot Playwright Service")
 async def background_scheduler():
     """每60秒检查一次是否有到期的定时任务"""
     logger.info("后台调度器已启动... (每 60 秒检查一次)")
-    await asyncio.sleep(10) # 启动时稍微延迟，等待服务完全启动
+    await asyncio.sleep(10) 
 
     while True:
         try:
             now_utc = datetime.datetime.now(datetime.timezone.utc)
-            current_utc_hm = now_utc.strftime("%H:%M") # 格式: "14:01"
+            current_utc_hm = now_utc.strftime("%H:%M") 
             
-            # 遍历所有已配置的计划
             for webhook_path, schedule in BOT_SCHEDULES.items():
                 
-                # 检查当前时间是否在“待发送时间列表”中
                 if current_utc_hm in schedule["times"]:
                     
                     last_sent_time = schedule.get("last_sent")
                     should_send = False
                     
-                    if last_sent_time is None: # 第一次运行，立即发送
+                    if last_sent_time is None: 
                         should_send = True
                     else:
                         delta = now_utc - last_sent_time
-                        if delta.total_seconds() > 3540: # (略小于 60 分钟)
+                        if delta.total_seconds() > 3540: 
                             should_send = True
                             
-                    # 如果需要发送...
                     if should_send:
                         application = BOT_APPLICATIONS.get(webhook_path)
                         if application:
-                            # 循环发送到多个 Chat ID
                             chat_ids_list = schedule["chat_ids"] 
                             message = schedule["message"]
                             
                             logger.info(f"Bot (路径: {webhook_path}) 正在发送定时消息到 {len(chat_ids_list)} 个 Chats...")
                             
-                            for chat_id in chat_ids_list: # 循环
+                            for chat_id in chat_ids_list: 
                                 try:
                                     await application.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML') 
                                     logger.info(f"Bot (路径: {webhook_path}) 定时消息 -> {chat_id} 发送成功。")
                                 except Exception as e:
                                     logger.error(f"Bot (路径: {webhook_path}) 发送定时消息 -> {chat_id} 失败: {e}")
                             
-                            schedule["last_sent"] = now_utc # 更新“上次发送时间”
+                            schedule["last_sent"] = now_utc 
                         else:
                             logger.warning(f"调度器：找不到 Bot Application 实例 (路径: {webhook_path})")
 
@@ -493,11 +573,12 @@ async def background_scheduler():
 async def startup_event():
     """在 FastAPI 启动时：1. 初始化 Bot 2. 启动 Playwright 3. 启动调度器"""
     
-    global BOT_APPLICATIONS, BOT_API_URLS, BOT_APK_URLS, BOT_SCHEDULES, PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
+    global BOT_APPLICATIONS, BOT_API_URLS, BOT_APK_URLS, BOT_SCHEDULES, BOT_ALLOWED_CHATS, PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
     BOT_APPLICATIONS = {}
     BOT_API_URLS = {}
     BOT_APK_URLS = {}
     BOT_SCHEDULES = {} 
+    BOT_ALLOWED_CHATS = {} # <-- 安全白名单 (重新加入)
 
     logger.info("应用启动中... 正在查找所有 Bot 配置。")
 
@@ -544,15 +625,10 @@ async def startup_event():
 
             if schedule_chat_ids_str and schedule_times_str and schedule_message:
                 try:
-                    # 解析逗号分隔的时间列表
                     times_list = [t.strip() for t in schedule_times_str.split(',') if t.strip()]
-                    if not times_list:
-                        raise ValueError("时间列表为空")
-
-                    # 解析逗号分隔的 Chat ID 列表
+                    if not times_list: raise ValueError("时间列表为空")
                     chat_ids_list = [cid.strip() for cid in schedule_chat_ids_str.split(',') if cid.strip()]
-                    if not chat_ids_list:
-                        raise ValueError("Chat ID 列表为空")
+                    if not chat_ids_list: raise ValueError("Chat ID 列表为空")
 
                     BOT_SCHEDULES[webhook_path] = {
                         "chat_ids": chat_ids_list, 
@@ -565,6 +641,17 @@ async def startup_event():
                     logger.error(f"Bot #{i} 的定时任务配置错误: {e}")
             else:
                 logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 未配置定时任务。")
+
+            # --- ⬇️ 安全白名单 (重新加入) ⬇️ ---
+            allowed_chats_name = f"BOT_{i}_ALLOWED_CHAT_IDS"
+            allowed_chats_str = os.getenv(allowed_chats_name)
+            if allowed_chats_str:
+                chat_ids_list = [cid.strip() for cid in allowed_chats_str.split(',') if cid.strip()]
+                BOT_ALLOWED_CHATS[webhook_path] = chat_ids_list
+                logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已加载 [安全白名单]: 允许 {len(chat_ids_list)} 个 Chat(s)")
+            else:
+                logger.warning(f"DIAGNOSTIC: Bot #{i} 未找到 {allowed_chats_name}。此 Bot 将 [不会] 响应任何群组或私聊的指令。")
+            # --- ⬆️ 安全白名单 (重新加入) ⬆️ ---
                 
             logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已创建并初始化。监听路径: /{webhook_path}")
 
@@ -633,16 +720,23 @@ async def root():
         schedule_info = "未配置"
         if BOT_SCHEDULES.get(path):
             schedule_info = f"配置于 UTC {BOT_SCHEDULES[path]['times']} -> {len(BOT_SCHEDULES[path]['chat_ids'])} 个 Chat(s)" 
-            
+        
+        # --- ⬇️ 健康检查 (重新加入) ⬇️ ---
+        allowed_info = "未配置 (不响应任何指令)"
+        if BOT_ALLOWED_CHATS.get(path):
+            allowed_info = f"已配置 (允许 {len(BOT_ALLOWED_CHATS[path])} 个 Chat(s))"
+        # --- ⬆️ 健康检查 (重新加入) ⬆️ ---
+
         active_bots_info[path] = {
             "token_end": app.bot.token[-4:],
             "api_url_universal": BOT_API_URLS.get(path, "未设置!"),
             "api_url_android_apk": BOT_APK_URLS.get(path, "未设置!"),
-            "schedule_info": schedule_info
+            "schedule_info": schedule_info,
+            "security_allowlist": allowed_info # <-- 重新加入
         }
     status = {
         "status": "OK",
-        "message": "Telegram Multi-Bot (Playwright JS + Scheduler) service is running.",
+        "message": "Telegram Multi-Bot (Playwright JS + Scheduler + Security) service is running.",
         "browser_status": browser_status,
         "active_bots_count": len(BOT_APPLICATIONS),
         "active_bots_info": active_bots_info
