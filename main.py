@@ -32,7 +32,7 @@ PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 
 # --- 3. 核心功能：获取动态链接 ---
-# (所有关键字定义与您上一版 21:40 的代码相同)
+# (您 21:58 版本的所有关键字)
 UNIVERSAL_COMMAND_PATTERN = r"^(地址|下载地址|下载链接|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接)$"
 ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(提包|安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
 IOS_QUIT_PATTERN = r"^(苹果大退|苹果重启|苹果大退重启|苹果黑屏|苹果重开)$"
@@ -45,7 +45,7 @@ IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
 
 # --- 辅助函数 ---
 
-# --- ⬇️ 关键修复：真正的智能安全检查 ⬇️ ---
+# --- ⬇️ 智能安全检查 ⬇️ ---
 def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
     """
     真正的智能安全检查：
@@ -83,7 +83,7 @@ def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
     # 4. 如果所有变体都失败了，则拒绝
     logger.warning(f"Bot (尾号: {current_app.bot.token[-4:]}) 收到来自 [未授权] Chat ID: {chat_id_str} (已检查 {possible_ids_to_check}) 的请求。已忽略。")
     return False
-# --- ⬆️ 关键修复 ⬆️ ---
+# --- ⬆️ 智能安全检查 ⬆️ ---
 
 
 # (您修改后的 4-7 位)
@@ -521,7 +521,7 @@ app = FastAPI(title="Multi-Bot Playwright Service")
 
 # --- 6. 应用启动/关闭事件 ---
 
-# --- ⬇️ 后台调度器 (与之前相同) ⬇️ ---
+# --- ⬇️ 后台调度器 (已修复 <br> Bug) ⬇️ ---
 async def background_scheduler():
     """每60秒检查一次是否有到期的定时任务"""
     logger.info("后台调度器已启动... (每 60 秒检查一次)")
@@ -550,13 +550,19 @@ async def background_scheduler():
                         application = BOT_APPLICATIONS.get(webhook_path)
                         if application:
                             chat_ids_list = schedule["chat_ids"] 
-                            message = schedule["message"]
+                            message_raw = schedule["message"] # <-- (来自 Env Var, 可能包含 <br>)
+                            
+                            # --- ⬇️ 关键修复：替换 <br> 标签 ⬇️ ---
+                            message_formatted = message_raw.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+                            # --- ⬆️ 关键修复 ⬆️ ---
                             
                             logger.info(f"Bot (路径: {webhook_path}) 正在发送定时消息到 {len(chat_ids_list)} 个 Chats...")
                             
                             for chat_id in chat_ids_list: 
                                 try:
-                                    await application.bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML') 
+                                    # --- ⬇️ 关键修复：发送格式化后的消息 ⬇️ ---
+                                    await application.bot.send_message(chat_id=chat_id, text=message_formatted, parse_mode='HTML') 
+                                    # --- ⬆️ 关键修复 ⬆️ ---
                                     logger.info(f"Bot (路径: {webhook_path}) 定时消息 -> {chat_id} 发送成功。")
                                 except Exception as e:
                                     logger.error(f"Bot (路径: {webhook_path}) 发送定时消息 -> {chat_id} 失败: {e}")
