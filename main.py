@@ -31,9 +31,13 @@ BOT_ALLOWED_CHATS: Dict[str, List[str]] = {} # <-- (保留) 安全白名单
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 
-# --- ⬇️ 新增：全局图片功能 ⬇️ ---
-GLOBAL_IMAGE_MAP: Dict[str, str] = {} # e.g. {"图片1": "url1", "图1": "url1"}
-GLOBAL_IMAGE_PATTERN: str = "" # e.g. r"^(图片1|图1|图片2)$"
+# (全局图片功能)
+GLOBAL_IMAGE_MAP: Dict[str, str] = {} 
+GLOBAL_IMAGE_PATTERN: str = "" 
+
+# --- ⬇️ 新增：全局视频功能 ⬇️ ---
+GLOBAL_VIDEO_MAP: Dict[str, str] = {} # e.g. {"视频1": "url1", "教程1": "url1"}
+GLOBAL_VIDEO_PATTERN: str = "" # e.g. r"^(视频1|教程1)$"
 # --- ⬆️ 新增 ⬆️ ---
 
 # --- 3. 核心功能：获取动态链接 ---
@@ -47,7 +51,7 @@ IOS_BROWSER_PATTERN = r"^(苹果浏览器手机版|苹果浏览器|苹果桌面�
 ANDROID_TAB_LIMIT_PATTERN = r"^(安卓窗口上限|窗口上限|标签上限)$"
 IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
 
-# (删除了 IMAGE_1_PATTERN 和 IMAGE_2_PATTERN)
+# (全局图片/视频关键字现在是动态加载的)
 
 # --- 辅助函数 ---
 
@@ -413,6 +417,35 @@ async def send_global_image(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(f"❌ 发送图片时发生内部错误。")
 # --- ⬆️ 新增 ⬆️ ---
 
+# --- ⬇️ 新增：核心处理器 10 (全局视频) ⬇️ ---
+async def send_global_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ (需求 10 - 静态回复 全局视频) """
+    
+    # --- ⬇️ 智能安全检查 ⬇️ ---
+    if not update.message or not is_chat_allowed(context, update.message.chat_id):
+        return # 不在白名单，立即停止
+    # --- ⬆️ 智能安全检查 ⬆️ ---
+
+    bot_token_end = context.application.bot.token[-4:]
+    keyword = update.message.text
+    logger.info(f"Bot {bot_token_end} 收到 [全局视频] 关键字: {keyword}，发送视频...")
+
+    # 1. 查找此关键字对应的全局 URL
+    video_url = GLOBAL_VIDEO_MAP.get(keyword)
+            
+    if not video_url:
+        logger.error(f"Bot (尾号: {bot_token_end}) 匹配了关键字 {keyword}，但在全局视频 MAP 中未找到 URL！")
+        return
+        
+    try:
+        # 2. 发送视频
+        await update.message.reply_video(video=video_url)
+        
+    except Exception as e:
+        logger.error(f"发送 [全局视频] ({keyword}) 时失败: {e}")
+        await update.message.reply_text(f"❌ 发送视频时发生内部错误。")
+# --- ⬆️ 新增 ⬆️ ---
+
 
 # --- 4. Bot 启动与停止逻辑 ---
 def setup_bot(app_instance: Application, bot_index: int) -> None:
@@ -438,9 +471,13 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
     app_instance.add_handler( MessageHandler( filters.TEXT & filters.Regex(IOS_TAB_LIMIT_PATTERN), send_ios_tab_limit_guide ))
     
     # --- ⬇️ 新增：(需求 9) 全局图片处理器 ⬇️ ---
-    # 仅在全局图片模式被（在 startup 中）成功初始化后才添加
     if GLOBAL_IMAGE_PATTERN:
         app_instance.add_handler( MessageHandler( filters.TEXT & filters.Regex(GLOBAL_IMAGE_PATTERN), send_global_image ))
+    # --- ⬆️ 新增 ⬆️ ---
+
+    # --- ⬇️ 新增：(需求 10) 全局视频处理器 ⬇️ ---
+    if GLOBAL_VIDEO_PATTERN:
+        app_instance.add_handler( MessageHandler( filters.TEXT & filters.Regex(GLOBAL_VIDEO_PATTERN), send_global_video ))
     # --- ⬆️ 新增 ⬆️ ---
     
     
@@ -462,14 +499,16 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
                        f"- 发送 `安卓窗口上限` 获取安卓窗口管理指南。\n"
                        f"- 发送 `苹果窗口上限` 获取苹果窗口管理指南。")
         
-        # --- ⬇️ 新增：动态添加图片关键字到 /start ⬇️ ---
+        # --- ⬇️ 新增：动态添加图片/视频关键字到 /start ⬇️ ---
         if GLOBAL_IMAGE_MAP:
             start_message += "\n\n<b>--- 快捷图片 ---</b>"
-            # (只显示前 5 个，防止 /start 太长)
-            for key in list(GLOBAL_IMAGE_MAP.keys())[:5]:
+            for key in list(GLOBAL_IMAGE_MAP.keys())[:3]: # (只显示前 3 个)
                 start_message += f"\n- 发送 `{key}` 获取图片"
-            if len(GLOBAL_IMAGE_MAP.keys()) > 5:
-                start_message += "\n- (以及其他...)"
+        
+        if GLOBAL_VIDEO_MAP:
+            start_message += "\n\n<b>--- 快捷视频 ---</b>"
+            for key in list(GLOBAL_VIDEO_MAP.keys())[:3]: # (只显示前 3 个)
+                start_message += f"\n- 发送 `{key}` 获取视频"
         # --- ⬆️ 新增 ⬆️ ---
 
         await update.message.reply_html(start_message)
@@ -544,8 +583,8 @@ async def startup_event():
     """在 FastAPI 启动时：1. 初始化 Bot 2. 启动 Playwright 3. 启动调度器"""
     
     global BOT_APPLICATIONS, BOT_API_URLS, BOT_APK_URLS, BOT_SCHEDULES, BOT_ALLOWED_CHATS, PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
-    # --- ⬇️ 新增：初始化全局图片字典 ⬇️ ---
-    global GLOBAL_IMAGE_MAP, GLOBAL_IMAGE_PATTERN
+    # --- ⬇️ 新增：初始化全局字典 ⬇️ ---
+    global GLOBAL_IMAGE_MAP, GLOBAL_IMAGE_PATTERN, GLOBAL_VIDEO_MAP, GLOBAL_VIDEO_PATTERN
     # --- ⬆️ 新增 ⬆️ ---
 
     BOT_APPLICATIONS = {}
@@ -553,9 +592,11 @@ async def startup_event():
     BOT_APK_URLS = {}
     BOT_SCHEDULES = {} 
     BOT_ALLOWED_CHATS = {} # <-- 智能安全白名单
-    # --- ⬇️ 新增：初始化全局图片字典 ⬇️ ---
+    # --- ⬇️ 新增：初始化全局字典 ⬇️ ---
     GLOBAL_IMAGE_MAP = {}
     GLOBAL_IMAGE_PATTERN = ""
+    GLOBAL_VIDEO_MAP = {}
+    GLOBAL_VIDEO_PATTERN = ""
     # --- ⬆️ 新增 ⬆️ ---
 
     logger.info("应用启动中... 正在查找所有 Bot 和全局配置。")
@@ -581,14 +622,41 @@ async def startup_event():
         elif (keys_str or url_value) and not (keys_str and url_value): # (只设置了其中一个)
              logger.warning(f"DIAGNOSTIC: 必须同时提供 {keys_name} 和 {url_name} 才能加载图片 {i}。")
 
-    # (如果加载了任何图片)
     if all_global_image_keys:
-        # (创建动态 Regex)
         escaped_keys = [re.escape(k) for k in all_global_image_keys]
         GLOBAL_IMAGE_PATTERN = r"^(" + "|".join(escaped_keys) + r")$"
         logger.info(f"✅ 成功构建 [全局图片 Regex 模式]: {GLOBAL_IMAGE_PATTERN}")
     else:
         logger.info("DIAGNOSTIC: 未配置任何全局图片。")
+    # --- ⬆️ 新增 ⬆️ ---
+
+    # --- ⬇️ 新增：加载全局视频配置 ⬇️ ---
+    all_global_video_keys = []
+    for i in range(1, 11): # 最多支持 10 个全局视频 (VIDEO_1 ... VIDEO_10)
+        keys_name = f"VIDEO_{i}_KEYS"
+        url_name = f"VIDEO_{i}_URL"
+        
+        keys_str = os.getenv(keys_name)
+        url_value = os.getenv(url_name)
+        
+        if keys_str and url_value:
+            keys_list = [k.strip() for k in keys_str.split(',') if k.strip()]
+            if keys_list:
+                logger.info(f"DIAGNOSTIC: 已加载 [全局视频 {i}]: 关键字 {keys_list} -> {url_value}")
+                for key in keys_list:
+                    GLOBAL_VIDEO_MAP[key] = url_value
+                all_global_video_keys.extend(keys_list)
+            else:
+                logger.warning(f"DIAGNOSTIC: {keys_name} 已设置，但关键字列表为空。")
+        elif (keys_str or url_value) and not (keys_str and url_value): # (只设置了其中一个)
+             logger.warning(f"DIAGNOSTIC: 必须同时提供 {keys_name} 和 {url_name} 才能加载视频 {i}。")
+
+    if all_global_video_keys:
+        escaped_keys = [re.escape(k) for k in all_global_video_keys]
+        GLOBAL_VIDEO_PATTERN = r"^(" + "|".join(escaped_keys) + r")$"
+        logger.info(f"✅ 成功构建 [全局视频 Regex 模式]: {GLOBAL_VIDEO_PATTERN}")
+    else:
+        logger.info("DIAGNOSTIC: 未配置任何全局视频。")
     # --- ⬆️ 新增 ⬆️ ---
 
 
@@ -606,7 +674,7 @@ async def startup_event():
             
             await application.initialize()
             
-            # (setup_bot 现在会*自动*添加全局图片处理器)
+            # (setup_bot 现在会*自动*添加全局图片/视频处理器)
             setup_bot(application, i)
             
             webhook_path = f"bot{i}_webhook"
@@ -751,6 +819,7 @@ async def root():
         "browser_status": browser_status,
         "active_bots_count": len(BOT_APPLICATIONS),
         "global_images_loaded": len(GLOBAL_IMAGE_MAP), # <-- 新增
+        "global_videos_loaded": len(GLOBAL_VIDEO_MAP), # <-- 新增
         "active_bots_info": active_bots_info
     }
     return status
