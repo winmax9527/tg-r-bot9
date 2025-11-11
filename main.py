@@ -26,10 +26,15 @@ logger = logging.getLogger(__name__)
 BOT_APPLICATIONS: Dict[str, Application] = {}
 BOT_API_URLS: Dict[str, str] = {}
 BOT_APK_URLS: Dict[str, str] = {}
-BOT_SCHEDULES: Dict[str, Dict[str, Any]] = {} 
-BOT_ALLOWED_CHATS: Dict[str, List[str]] = {} # <-- 安全白名单
+BOT_SCHEDULES: Dict[str, Dict[str, Any]] = {} # <-- (保留) 定时任务
+BOT_ALLOWED_CHATS: Dict[str, List[str]] = {} # <-- (保留) 安全白名单
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
+
+# --- ⬇️ 新增：全局图片功能 ⬇️ ---
+GLOBAL_IMAGE_MAP: Dict[str, str] = {} # e.g. {"图片1": "url1", "图1": "url1"}
+GLOBAL_IMAGE_PATTERN: str = "" # e.g. r"^(图片1|图1|图片2)$"
+# --- ⬆️ 新增 ⬆️ ---
 
 # --- 3. 核心功能：获取动态链接 ---
 # (您 21:58 版本的所有关键字)
@@ -42,10 +47,11 @@ IOS_BROWSER_PATTERN = r"^(苹果浏览器手机版|苹果浏览器|苹果桌面�
 ANDROID_TAB_LIMIT_PATTERN = r"^(安卓窗口上限|窗口上限|标签上限)$"
 IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
 
+# (删除了 IMAGE_1_PATTERN 和 IMAGE_2_PATTERN)
 
 # --- 辅助函数 ---
 
-# --- ⬇️ 智能安全检查 ⬇️ ---
+# --- ⬇️ 智能安全检查 (我们最终的修复版) ⬇️ ---
 def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
     """
     真正的智能安全检查：
@@ -62,16 +68,12 @@ def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
             
     # 2. 创建所有可能的 ID 变体
     chat_id_str = str(chat_id)
-    possible_ids_to_check = {chat_id_str} # 使用集合避免重复
+    possible_ids_to_check = {chat_id_str} 
 
     if chat_id_str.startswith("-100"):
-        # 这是一个 "长" ID (e.g., -10012345)
-        # 我们也应该检查它的 "短" 变体 (e.g., -12345)
         short_id = f"-{chat_id_str[4:]}"
         possible_ids_to_check.add(short_id)
     elif chat_id_str.startswith("-"):
-        # 这是一个 "短" ID (e.g., -12345)
-        # 我们也应该检查它的 "长" 变体 (e.g., -10012345)
         long_id = f"-100{chat_id_str[1:]}"
         possible_ids_to_check.add(long_id)
 
@@ -246,19 +248,16 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
         logger.error(f"处理 get_android_specific_link 时发生错误: {e}")
         await update.message.reply_text(f"❌ 处理安卓链接时发生内部错误。")
 
+# --- (指南 处理器 3, 4, 5, 6, 7, 8) ---
+# ... (所有 6 个指南处理器: send_ios_quit_guide, send_android_quit_guide, 等等... 保持不变)
+# ... (为节省篇幅，我在这里省略了它们，但它们在下面的完整代码中)
+
 # --- 核心处理器 3 (苹果重启指南) ---
 async def send_ios_quit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 3 - 静态回复 iOS) """
-    
-    # --- ⬇️ 智能安全检查 ⬇️ ---
-    if not update.message or not is_chat_allowed(context, update.message.chat_id):
-        return # 不在白名单，立即停止
-    # --- ⬆️ 智能安全检查 ⬆️ ---
-
+    if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [苹果大退] 关键字，发送 iOS 重启指南...")
-    
-    # (您修改后的)
     message = """📱 <b>苹果手机大退重启步骤</b>
 
 <b>1. 关闭App:</b> 在主屏幕上，从屏幕底部向上轻扫并在中间稍作停留，调出后台多任务界面。
@@ -266,7 +265,6 @@ async def send_ios_quit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE
 <b>2. 找到并关闭:</b> 向左或向右滑动卡片找到要关闭的App，然后在该App的卡片上向上轻扫。
 
 <b>3. 重新打开:</b> 返回主屏幕，点击该App图标重新打开。"""
-    
     try:
         await update.message.reply_html(message)
     except Exception as e:
@@ -275,16 +273,9 @@ async def send_ios_quit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE
 # --- 核心处理器 4 (安卓重启指南) ---
 async def send_android_quit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 4 - 静态回复 Android) """
-    
-    # --- ⬇️ 智能安全检查 ⬇️ ---
-    if not update.message or not is_chat_allowed(context, update.message.chat_id):
-        return # 不在白名单，立即停止
-    # --- ⬆️ 智能安全检查 ⬆️ ---
-
+    if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [安卓大退] 关键字，发送 Android 重启指南...")
-    
-    # (您修改后的)
     message = """🤖 <b>安卓手机大退重启步骤</b>
 
 <b>1. 关闭App:</b>
@@ -294,7 +285,6 @@ async def send_android_quit_guide(update: Update, context: ContextTypes.DEFAULT_
 <b>2. 找到并关闭:</b> 在后台列表中，向上滑动要关闭的App卡片。
 
 <b>3. 重新打开:</b> 返回主屏幕或应用抽屉，点击该App图标重新打开。"""
-    
     try:
         await update.message.reply_html(message)
     except Exception as e:
@@ -303,16 +293,9 @@ async def send_android_quit_guide(update: Update, context: ContextTypes.DEFAULT_
 # --- 核心处理器 5 (安卓浏览器指南) ---
 async def send_android_browser_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 5 - 静态回复 Android 浏览器) """
-    
-    # --- ⬇️ 智能安全检查 ⬇️ ---
-    if not update.message or not is_chat_allowed(context, update.message.chat_id):
-        return # 不在白名单，立即停止
-    # --- ⬆️ 智能安全检查 ⬆️ ---
-
+    if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [安卓浏览器] 关键字，发送浏览器指南...")
-    
-    # (您修改后的)
     message = """🤖 <b>安卓手机浏览器设置为手机版模式步骤</b>
 
 核心操作就是找到并关闭“桌面版”模式。
@@ -326,7 +309,6 @@ async def send_android_browser_guide(update: Update, context: ContextTypes.DEFAU
 <b>4. 取消勾选:</b> 确保该选项<b>没有</b>被勾选 (开关处于关闭状态)。
 
 <b>5. 刷新页面:</b> 页面会自动刷新，恢复为手机版的 UA 标识和显示界面。"""
-    
     try:
         await update.message.reply_html(message)
     except Exception as e:
@@ -335,16 +317,9 @@ async def send_android_browser_guide(update: Update, context: ContextTypes.DEFAU
 # --- 核心处理器 6 (苹果浏览器指南) ---
 async def send_ios_browser_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 6 - 静态回复 Apple 浏览器) """
-    
-    # --- ⬇️ 智能安全检查 ⬇️ ---
-    if not update.message or not is_chat_allowed(context, update.message.chat_id):
-        return # 不在白名单，立即停止
-    # --- ⬆️ 智能安全检查 ⬆️ ---
-
+    if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [苹果浏览器] 关键字，发送浏览器指南...")
-    
-    # (您修改后的)
     message = """📱 <b>苹果手机浏览器设置为手机版移动网站步骤</b>
 
 在苹果设备上，使用 Safari 或其他浏览器时：
@@ -360,7 +335,6 @@ async def send_ios_browser_guide(update: Update, context: ContextTypes.DEFAULT_T
 <b>5. 取消勾选/关闭:</b> 确保该选项处于<b>未勾选</b>或<b>关闭</b>状态。
 
 <b>6. 刷新页面:</b> 页面会自动加载手机版界面。"""
-    
     try:
         await update.message.reply_html(message)
     except Exception as e:
@@ -369,16 +343,9 @@ async def send_ios_browser_guide(update: Update, context: ContextTypes.DEFAULT_T
 # --- 核心处理器 7 (安卓窗口上限指南) ---
 async def send_android_tab_limit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 7 - 静态回复 Android 窗口上限) """
-    
-    # --- ⬇️ 智能安全检查 ⬇️ ---
-    if not update.message or not is_chat_allowed(context, update.message.chat_id):
-        return # 不在白名单，立即停止
-    # --- ⬆️ 智能安全检查 ⬆️ ---
-
+    if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [安卓窗口上限] 关键字，发送窗口指南...")
-    
-    # (您修改后的)
     message = """🤖 <b>安卓/平板浏览器窗口上限解决步骤</b>
 
 <b>1. 打开浏览器:</b> 启动您使用的浏览器 App (如 Chrome、华为浏览器、小米浏览器等)。
@@ -390,7 +357,6 @@ async def send_android_tab_limit_guide(update: Update, context: ContextTypes.DEF
 <b>4. 批量关闭:</b> 寻找“关闭所有标签页”或类似的选项。多数浏览器在右上角或菜单中提供此功能。
 
 <b>5. 或手动关闭:</b> 您也可以通过向上滑动或点击每个标签页的“x”按钮逐个关闭。"""
-    
     try:
         await update.message.reply_html(message)
     except Exception as e:
@@ -399,16 +365,9 @@ async def send_android_tab_limit_guide(update: Update, context: ContextTypes.DEF
 # --- 核心处理器 8 (苹果窗口上限指南) ---
 async def send_ios_tab_limit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 8 - 静态回复 Apple 窗口上限) """
-    
-    # --- ⬇️ 智能安全检查 ⬇️ ---
-    if not update.message or not is_chat_allowed(context, update.message.chat_id):
-        return # 不在白名单，立即停止
-    # --- ⬆️ 智能安全检查 ⬆️ ---
-
+    if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     bot_token_end = context.application.bot.token[-4:]
     logger.info(f"Bot {bot_token_end} 收到 [苹果窗口上限] 关键字，发送窗口指南...")
-    
-    # (您修改后的)
     message = """📱 <b>苹果/平板浏览器窗口上限解决步骤</b>
 
 <b>1. 打开 Safari 浏览器。</b>
@@ -418,11 +377,41 @@ async def send_ios_tab_limit_guide(update: Update, context: ContextTypes.DEFAULT
 <b>3. 批量关闭:</b> <b>长按</b>该标签页图标，会弹出一个菜单。选择“关闭[数字]个标签页”或“关闭所有标签页”。
 
 <b>4. 或手动关闭:</b> 进入标签页管理界面后，向左滑动每个标签页，或者点击左上角的“X”来关闭。"""
-    
     try:
         await update.message.reply_html(message)
     except Exception as e:
         logger.error(f"发送 [苹果窗口上限] 指南时失败: {e}")
+
+
+# --- ⬇️ 新增：核心处理器 9 (全局图片) ⬇️ ---
+async def send_global_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ (需求 9 - 静态回复 全局图片) """
+    
+    # --- ⬇️ 智能安全检查 ⬇️ ---
+    if not update.message or not is_chat_allowed(context, update.message.chat_id):
+        return # 不在白名单，立即停止
+    # --- ⬆️ 智能安全检查 ⬆️ ---
+
+    bot_token_end = context.application.bot.token[-4:]
+    keyword = update.message.text
+    logger.info(f"Bot {bot_token_end} 收到 [全局图片] 关键字: {keyword}，发送图片...")
+
+    # 1. 查找此关键字对应的全局 URL
+    image_url = GLOBAL_IMAGE_MAP.get(keyword)
+            
+    if not image_url:
+        # 这种情况不应该发生，因为 Regex 已经匹配了
+        logger.error(f"Bot (尾号: {bot_token_end}) 匹配了关键字 {keyword}，但在全局图片 MAP 中未找到 URL！")
+        return
+        
+    try:
+        # 2. 发送图片
+        await update.message.reply_photo(photo=image_url)
+        
+    except Exception as e:
+        logger.error(f"发送 [全局图片] ({keyword}) 时失败: {e}")
+        await update.message.reply_text(f"❌ 发送图片时发生内部错误。")
+# --- ⬆️ 新增 ⬆️ ---
 
 
 # --- 4. Bot 启动与停止逻辑 ---
@@ -432,67 +421,27 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
     logger.info(f"Bot Application 实例 (#{bot_index}, 尾号: {token_end}) 正在配置 Handlers。")
 
     # (需求 1) 处理器
-    app_instance.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.Regex(UNIVERSAL_COMMAND_PATTERN), 
-            get_universal_link
-        )
-    )
-    
+    app_instance.add_handler( MessageHandler( filters.TEXT & filters.Regex(UNIVERSAL_COMMAND_PATTERN), get_universal_link ))
     # (需求 2) 处理器
-    app_instance.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.Regex(ANDROID_SPECIFIC_COMMAND_PATTERN),
-            get_android_specific_link
-        )
-    )
-
+    app_instance.add_handler( MessageHandler( filters.TEXT & filters.Regex(ANDROID_SPECIFIC_COMMAND_PATTERN), get_android_specific_link ))
     # (需求 3) 处理器
-    app_instance.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.Regex(IOS_QUIT_PATTERN),
-            send_ios_quit_guide
-        )
-    )
+    app_instance.add_handler( MessageHandler( filters.TEXT & filters.Regex(IOS_QUIT_PATTERN), send_ios_quit_guide ))
     # (需求 4) 处理器
-    app_instance.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.Regex(ANDROID_QUIT_PATTERN),
-            send_android_quit_guide
-        )
-    )
-
+    app_instance.add_handler( MessageHandler( filters.TEXT & filters.Regex(ANDROID_QUIT_PATTERN), send_android_quit_guide ))
     # (需求 5) 处理器
-    app_instance.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.Regex(ANDROID_BROWSER_PATTERN),
-            send_android_browser_guide
-        )
-    )
-    
+    app_instance.add_handler( MessageHandler( filters.TEXT & filters.Regex(ANDROID_BROWSER_PATTERN), send_android_browser_guide ))
     # (需求 6) 处理器
-    app_instance.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.Regex(IOS_BROWSER_PATTERN),
-            send_ios_browser_guide
-        )
-    )
-    
+    app_instance.add_handler( MessageHandler( filters.TEXT & filters.Regex(IOS_BROWSER_PATTERN), send_ios_browser_guide ))
     # (需求 7) 处理器
-    app_instance.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.Regex(ANDROID_TAB_LIMIT_PATTERN),
-            send_android_tab_limit_guide
-        )
-    )
-    
+    app_instance.add_handler( MessageHandler( filters.TEXT & filters.Regex(ANDROID_TAB_LIMIT_PATTERN), send_android_tab_limit_guide ))
     # (需求 8) 处理器
-    app_instance.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.Regex(IOS_TAB_LIMIT_PATTERN),
-            send_ios_tab_limit_guide
-        )
-    )
+    app_instance.add_handler( MessageHandler( filters.TEXT & filters.Regex(IOS_TAB_LIMIT_PATTERN), send_ios_tab_limit_guide ))
+    
+    # --- ⬇️ 新增：(需求 9) 全局图片处理器 ⬇️ ---
+    # 仅在全局图片模式被（在 startup 中）成功初始化后才添加
+    if GLOBAL_IMAGE_PATTERN:
+        app_instance.add_handler( MessageHandler( filters.TEXT & filters.Regex(GLOBAL_IMAGE_PATTERN), send_global_image ))
+    # --- ⬆️ 新增 ⬆️ ---
     
     
     async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -503,15 +452,27 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
         # --- ⬆️ 智能安全检查 ⬆️ ---
 
         # (您修改后的 /start 消息)
-        await update.message.reply_html(f"🤖 Bot #{bot_index} (尾号: {token_end}) 已准备就绪。\n"
-                                      f"- 发送 `链接`、`地址` 等获取通用链接。\n"
-                                      f"- 发送 `安卓专用` 等获取 APK 链接。\n"
-                                      f"- 发送 `苹果大退` 获取 iOS 重启指南。\n"
-                                      f"- 发送 `安卓大退` 获取 Android 重启指南。\n"
-                                      f"- 发送 `安卓浏览器手机版` 获取安卓浏览器设置指南。\n"
-                                      f"- 发送 `苹果浏览器手机版` 获取苹果浏览器设置指南。\n"
-                                      f"- 发送 `安卓窗口上限` 获取安卓窗口管理指南。\n"
-                                      f"- 发送 `苹果窗口上限` 获取苹果窗口管理指南。")
+        start_message = (f"🤖 Bot #{bot_index} (尾号: {token_end}) 已准备就绪。\n"
+                       f"- 发送 `链接`、`地址` 等获取通用链接。\n"
+                       f"- 发送 `安卓专用` 等获取 APK 链接。\n"
+                       f"- 发送 `苹果大退` 获取 iOS 重启指南。\n"
+                       f"- 发送 `安卓大退` 获取 Android 重启指南。\n"
+                       f"- 发送 `安卓浏览器手机版` 获取安卓浏览器设置指南。\n"
+                       f"- 发送 `苹果浏览器手机版` 获取苹果浏览器设置指南。\n"
+                       f"- 发送 `安卓窗口上限` 获取安卓窗口管理指南。\n"
+                       f"- 发送 `苹果窗口上限` 获取苹果窗口管理指南。")
+        
+        # --- ⬇️ 新增：动态添加图片关键字到 /start ⬇️ ---
+        if GLOBAL_IMAGE_MAP:
+            start_message += "\n\n<b>--- 快捷图片 ---</b>"
+            # (只显示前 5 个，防止 /start 太长)
+            for key in list(GLOBAL_IMAGE_MAP.keys())[:5]:
+                start_message += f"\n- 发送 `{key}` 获取图片"
+            if len(GLOBAL_IMAGE_MAP.keys()) > 5:
+                start_message += "\n- (以及其他...)"
+        # --- ⬆️ 新增 ⬆️ ---
+
+        await update.message.reply_html(start_message)
     
     app_instance.add_handler(CommandHandler("start", start_command))
     
@@ -583,27 +544,69 @@ async def startup_event():
     """在 FastAPI 启动时：1. 初始化 Bot 2. 启动 Playwright 3. 启动调度器"""
     
     global BOT_APPLICATIONS, BOT_API_URLS, BOT_APK_URLS, BOT_SCHEDULES, BOT_ALLOWED_CHATS, PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
+    # --- ⬇️ 新增：初始化全局图片字典 ⬇️ ---
+    global GLOBAL_IMAGE_MAP, GLOBAL_IMAGE_PATTERN
+    # --- ⬆️ 新增 ⬆️ ---
+
     BOT_APPLICATIONS = {}
     BOT_API_URLS = {}
     BOT_APK_URLS = {}
     BOT_SCHEDULES = {} 
     BOT_ALLOWED_CHATS = {} # <-- 智能安全白名单
+    # --- ⬇️ 新增：初始化全局图片字典 ⬇️ ---
+    GLOBAL_IMAGE_MAP = {}
+    GLOBAL_IMAGE_PATTERN = ""
+    # --- ⬆️ 新增 ⬆️ ---
 
-    logger.info("应用启动中... 正在查找所有 Bot 配置。")
+    logger.info("应用启动中... 正在查找所有 Bot 和全局配置。")
 
+    # --- ⬇️ 新增：首先加载全局图片配置 ⬇️ ---
+    all_global_image_keys = []
+    for i in range(1, 11): # 最多支持 10 个全局图片 (IMAGE_1 ... IMAGE_10)
+        keys_name = f"IMAGE_{i}_KEYS"
+        url_name = f"IMAGE_{i}_URL"
+        
+        keys_str = os.getenv(keys_name)
+        url_value = os.getenv(url_name)
+        
+        if keys_str and url_value:
+            keys_list = [k.strip() for k in keys_str.split(',') if k.strip()]
+            if keys_list:
+                logger.info(f"DIAGNOSTIC: 已加载 [全局图片 {i}]: 关键字 {keys_list} -> {url_value}")
+                for key in keys_list:
+                    GLOBAL_IMAGE_MAP[key] = url_value
+                all_global_image_keys.extend(keys_list)
+            else:
+                logger.warning(f"DIAGNOSTIC: {keys_name} 已设置，但关键字列表为空。")
+        elif (keys_str or url_value) and not (keys_str and url_value): # (只设置了其中一个)
+             logger.warning(f"DIAGNOSTIC: 必须同时提供 {keys_name} 和 {url_name} 才能加载图片 {i}。")
+
+    # (如果加载了任何图片)
+    if all_global_image_keys:
+        # (创建动态 Regex)
+        escaped_keys = [re.escape(k) for k in all_global_image_keys]
+        GLOBAL_IMAGE_PATTERN = r"^(" + "|".join(escaped_keys) + r")$"
+        logger.info(f"✅ 成功构建 [全局图片 Regex 模式]: {GLOBAL_IMAGE_PATTERN}")
+    else:
+        logger.info("DIAGNOSTIC: 未配置任何全局图片。")
+    # --- ⬆️ 新增 ⬆️ ---
+
+
+    # --- ⬇️ 接下来，加载所有 Bot (和之前一样) ⬇️ ---
     for i in range(1, 10): 
         token_name = f"BOT_TOKEN_{i}"
         token_value = os.getenv(token_name)
         
         # 只要有 Token，就加载 Bot
         if token_value:
-            logger.info(f"DIAGNOSTIC: 发现 Bot #{i}: Token (尾号: {token_value[-4:]})")
+            logger.info(f"DIAGNOSTIC: D 发现 Bot #{i}: Token (尾号: {token_value[-4:]})")
             
             application = Application.builder().token(token_value).build()
             application.bot_data["fastapi_app"] = app
             
             await application.initialize()
             
+            # (setup_bot 现在会*自动*添加全局图片处理器)
             setup_bot(application, i)
             
             webhook_path = f"bot{i}_webhook"
@@ -651,7 +654,7 @@ async def startup_event():
             else:
                 logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 未配置定时任务。")
 
-            # --- ⬇️ 智能安全白名单 ⬇️ ---
+            # 4. 加载安全白名单
             allowed_chats_name = f"BOT_{i}_ALLOWED_CHAT_IDS"
             allowed_chats_str = os.getenv(allowed_chats_name)
             if allowed_chats_str:
@@ -660,7 +663,8 @@ async def startup_event():
                 logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已加载 [安全白名单]: 允许 {len(chat_ids_list)} 个 Chat(s)")
             else:
                 logger.warning(f"DIAGNOSTIC: Bot #{i} 未找到 {allowed_chats_name}。此 Bot 将 [不会] 响应任何群组或私聊的指令。")
-            # --- ⬆️ 智能安全白名单 ⬆️ ---
+                
+            # (删除了每-Bot-图片加载)
                 
             logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已创建并初始化。监听路径: /{webhook_path}")
 
@@ -730,24 +734,23 @@ async def root():
         if BOT_SCHEDULES.get(path):
             schedule_info = f"配置于 UTC {BOT_SCHEDULES[path]['times']} -> {len(BOT_SCHEDULES[path]['chat_ids'])} 个 Chat(s)" 
         
-        # --- ⬇️ 健康检查 (重新加入) ⬇️ ---
         allowed_info = "未配置 (不响应任何指令)"
         if BOT_ALLOWED_CHATS.get(path):
             allowed_info = f"已配置 (允许 {len(BOT_ALLOWED_CHATS[path])} 个 Chat(s))"
-        # --- ⬆️ 健康检查 (重新加入) ⬆️ ---
-
+        
         active_bots_info[path] = {
             "token_end": app.bot.token[-4:],
             "api_url_universal": BOT_API_URLS.get(path, "未设置!"),
             "api_url_android_apk": BOT_APK_URLS.get(path, "未设置!"),
             "schedule_info": schedule_info,
-            "security_allowlist": allowed_info # <-- 重新加入
+            "security_allowlist": allowed_info,
         }
     status = {
         "status": "OK",
         "message": "Telegram Multi-Bot (Playwright JS + Scheduler + Security) service is running.",
         "browser_status": browser_status,
         "active_bots_count": len(BOT_APPLICATIONS),
+        "global_images_loaded": len(GLOBAL_IMAGE_MAP), # <-- 新增
         "active_bots_info": active_bots_info
     }
     return status
