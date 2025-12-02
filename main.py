@@ -199,9 +199,14 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         final_modified_url = modify_url_subdomain(domain_b, random_sub)
         logger.info(f"步骤 3 成功: 最终 URL -> {final_modified_url}")
 
-        # --- 步骤 4: 发送最终 URL (您修改后的) ---
-        await update.message.reply_text(f"✅ 您的专属通用下载链接已生成：\n{final_modified_url}")
-
+       # --- 步骤 4: 发送最终 URL (点击复制版) ---
+        # 使用 HTML 的 <code> 标签，用户点击链接文本会自动复制
+        message_html = (
+            "✅ <b>您的专属通用下载链接已生成：</b>\n"
+            "👇 <b>点击下方链接将自动复制：</b>\n\n"
+            f"<code>{final_modified_url}</code>"
+        )
+        await update.message.reply_html(message_html)
     except Exception as e:
         logger.error(f"处理 get_universal_link (Playwright) 时发生错误: {e}")
         if "Timeout" in str(e):
@@ -245,8 +250,13 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
         # 3. 格式化 URL (替换模板中的第一个 *)
         final_url = apk_template.replace("*", random_sub, 1)
         
-        # 4. 发送 (您修改后的)
-        await update.message.reply_text(f"✅ 您的专属安卓专用下载链接已生成：\n{final_url}")
+        # 4. 发送 (点击复制版)
+        message_html = (
+            "✅ <b>您的专属安卓专用链接已生成：</b>\n"
+            "👇 <b>点击下方链接将自动复制：</b>\n\n"
+            f"<code>{final_url}</code>"
+        )
+        await update.message.reply_html(message_html)
         
     except Exception as e:
         logger.error(f"处理 get_android_specific_link 时发生错误: {e}")
