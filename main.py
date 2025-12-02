@@ -202,7 +202,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
        # --- 步骤 4: 发送最终 URL (点击复制版) ---
         # 使用 HTML 的 <code> 标签，用户点击链接文本会自动复制
         message_html = (
-            "✅ <b>您的专属通用下载链接已生成：</b>\n"
+            "✅ <b>您的专属通用下载链接已生成！</b>\n"
             "👇 <b>点击下方链接将自动复制：</b>\n\n"
             f"<code>{final_modified_url}</code>"
         )
@@ -252,7 +252,7 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
         
         # 4. 发送 (点击复制版)
         message_html = (
-            "✅ <b>您的专属安卓专用链接已生成：</b>\n"
+            "✅ <b>您的专属安卓专用链接已生成！</b>\n"
             "👇 <b>点击下方链接将自动复制：</b>\n\n"
             f"<code>{final_url}</code>"
         )
