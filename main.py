@@ -205,7 +205,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "✅ <b>您的专属通用下载链接已生成！</b>\n"
             "👇 <b>点击下方链接即可复制：</b>\n"
             f"<code>{final_modified_url}</code>" 
-            "<i>(💡 请务必在【手机自带浏览器】中粘贴打开)</i>"
+            "\n<i>(💡 请务必在【手机自带浏览器】中粘贴打开)</i>"
         )
         await update.message.reply_html(message_html)
     except Exception as e:
@@ -256,7 +256,7 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
             "✅ <b>您的专属安卓专用链接已生成！</b>\n"
             "👇 <b>点击下方链接即可复制：</b>\n"
             f"<code>{final_url}</code>"
-            "<i>(💡 请务必在【手机自带浏览器】中粘贴打开)</i>"
+            "\n<i>(💡 请务必在【手机自带浏览器】中粘贴打开)</i>"
         )
         await update.message.reply_html(message_html)
         
