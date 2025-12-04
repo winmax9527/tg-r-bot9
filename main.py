@@ -137,12 +137,16 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not update.message or not is_chat_allowed(context, update.message.chat_id):
         return
 
-    # 📝 日志：收到请求
-    logger.info(f"📨 [收到请求] 用户 {update.message.chat_id} 请求通用链接")
+    # 🔥 获取 Bot ID (身份证)
+    bot_id = context.bot_data.get("bot_index", "?")
+    chat_id = update.message.chat_id
+
+    # 📝 日志：带上 Bot ID
+    logger.info(f"🤖 [Bot #{bot_id}] 📨 收到请求 | 用户 {chat_id}")
 
     fastapi_app = context.bot_data.get("fastapi_app")
     if not fastapi_app or not hasattr(fastapi_app.state, 'browser'):
-        logger.error("❌ 浏览器实例未找到")
+        logger.error(f"🤖 [Bot #{bot_id}] ❌ 浏览器实例未找到")
         await safe_reply(update, "❌ 服务内部错误：浏览器未启动。")
         return
 
@@ -154,7 +158,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             break
             
     if not api_url:
-        logger.error("❌ 未找到 API 配置")
+        logger.error(f"🤖 [Bot #{bot_id}] ❌ 未找到 API 配置")
         await safe_reply(update, "❌ 配置错误：未找到此 Bot 的 API 地址。")
         return
 
@@ -175,13 +179,13 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if GLOBAL_HTTP_CLIENT is None:
                  raise RuntimeError("Global HTTP Client not initialized")
 
-            logger.info(f"🔄 [步骤 1] 正访问 API: {api_url}")
+            logger.info(f"🤖 [Bot #{bot_id}] 🔄 [步骤 1] 正访问 API: {api_url}")
             resp = await GLOBAL_HTTP_CLIENT.get(api_url, headers={'User-Agent': user_agent})
             resp.raise_for_status()
             api_data = resp.json()
 
             if api_data.get("code") != 0 or "data" not in api_data:
-                logger.warning(f"❌ API 返回无效: {api_data}")
+                logger.warning(f"🤖 [Bot #{bot_id}] ❌ API 返回无效: {api_data}")
                 await safe_reply(update, "❌ API 未返回有效链接。")
                 return
 
@@ -189,10 +193,10 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if not domain_a.startswith(('http://', 'https://')):
                 domain_a = 'http://' + domain_a
             
-            logger.info(f"✅ [步骤 1 成功] 获取到入口: {domain_a}")
+            logger.info(f"🤖 [Bot #{bot_id}] ✅ [步骤 1 成功] 获取到入口: {domain_a}")
 
             # --- 步骤 2: [Playwright] ---
-            logger.info("🚀 [步骤 2] 启动浏览器页面...")
+            logger.info(f"🤖 [Bot #{bot_id}] 🚀 [步骤 2] 启动浏览器页面...")
             browser_context = await fastapi_app.state.browser.new_context(
                 user_agent=user_agent,
                 viewport={'width': 1280, 'height': 800}
@@ -202,7 +206,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             page.set_default_timeout(30000) # 30秒超时
 
             try:
-                logger.info(f"🌍 [步骤 2] 浏览器跳转: {domain_a}")
+                logger.info(f"🤖 [Bot #{bot_id}] 🌍 [步骤 2] 浏览器跳转: {domain_a}")
                 await page.goto(domain_a, wait_until="domcontentloaded")
                 try:
                     await page.wait_for_timeout(1500)
@@ -210,16 +214,16 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     pass
 
             except PlaywrightTimeoutError:
-                logger.error("❌ 浏览器访问超时")
+                logger.error(f"🤖 [Bot #{bot_id}] ❌ 浏览器访问超时")
                 await safe_reply(update, "❌ 源站响应太慢，请重试。")
                 return 
             except Exception as e:
-                logger.error(f"❌ 浏览器访问出错: {e}")
+                logger.error(f"🤖 [Bot #{bot_id}] ❌ 浏览器访问出错: {e}")
                 await safe_reply(update, "❌ 无法连接到源站。")
                 return 
             
             domain_b = page.url 
-            logger.info(f"✅ [步骤 2 成功] 落地页: {domain_b}")
+            logger.info(f"🤖 [Bot #{bot_id}] ✅ [步骤 2 成功] 落地页: {domain_b}")
 
             if "chrome-error://" in domain_b or "chromewebdata" in domain_b:
                 await safe_reply(update, "⚠️ 线路维护中，请稍后再试。")
@@ -236,13 +240,13 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 "\n💡 <i>请务必在手机自带浏览器中打开</i>"
             )
             await safe_reply(update, msg, parse_mode='HTML')
-            logger.info(f"🎉 [完成] 已发送最终链接: {final_url}")
+            logger.info(f"🤖 [Bot #{bot_id}] 🎉 [完成] 已发送最终链接: {final_url}")
 
         except httpx.TimeoutException:
-            logger.error("❌ HTTP请求超时")
+            logger.error(f"🤖 [Bot #{bot_id}] ❌ HTTP请求超时")
             await safe_reply(update, "❌ 获取链接超时，对方服务器响应太慢，请重试。")
         except Exception as e:
-            logger.error(f"❌ 未知处理错误: {e}")
+            logger.error(f"🤖 [Bot #{bot_id}] ❌ 未知处理错误: {e}")
             await safe_reply(update, "❌ 系统繁忙，请重试。")
             
         finally:
@@ -402,6 +406,8 @@ async def startup_event():
         if token:
             application = Application.builder().token(token).build()
             application.bot_data["fastapi_app"] = app
+            # 🔥 这里把 Bot 的 ID 存进去，方便后面查
+            application.bot_data["bot_index"] = i 
             await application.initialize()
             setup_bot(application, i)
             
