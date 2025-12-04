@@ -18,12 +18,22 @@ from telegram.error import BadRequest
 # 引入 Playwright
 from playwright.async_api import async_playwright, Playwright, Browser, TimeoutError as PlaywrightTimeoutError
 
-# --- 1. 配置日志记录 ---
+# ==============================================================================
+# 1. 日志配置 (优化部分：降噪模式)
+# ==============================================================================
 logging.basicConfig(
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-logger = logging.getLogger(__name__)
+# 获取我们自己的 Logger，起个名字叫 'BotLogic' 方便识别
+logger = logging.getLogger("BotLogic")
+
+# 🔥 关键修改：让第三方库闭嘴 (降噪) 🔥
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 # --- 2. 全局状态 ---
 BOT_APPLICATIONS: Dict[str, Application] = {}
@@ -39,7 +49,6 @@ GLOBAL_HTTP_CLIENT: httpx.AsyncClient | None = None
 
 # 🔥 核心修复：并发锁 (Semaphore)
 # 限制同一时间只能有 1 个浏览器在运行，防止内存炸裂
-# 如果你的服务器配置很高，可以把 1 改成 2 或 3
 BROWSER_LOCK = asyncio.Semaphore(1)
 
 # 全局图片/视频
@@ -128,8 +137,12 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not update.message or not is_chat_allowed(context, update.message.chat_id):
         return
 
+    # 📝 日志：收到请求
+    logger.info(f"📨 [收到请求] 用户 {update.message.chat_id} 请求通用链接")
+
     fastapi_app = context.bot_data.get("fastapi_app")
     if not fastapi_app or not hasattr(fastapi_app.state, 'browser'):
+        logger.error("❌ 浏览器实例未找到")
         await safe_reply(update, "❌ 服务内部错误：浏览器未启动。")
         return
 
@@ -141,6 +154,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             break
             
     if not api_url:
+        logger.error("❌ 未找到 API 配置")
         await safe_reply(update, "❌ 配置错误：未找到此 Bot 的 API 地址。")
         return
 
@@ -155,26 +169,30 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
     page = None 
     
     # 🔥 核心修改：加锁！排队！
-    # 就算 10 个 Bot 同时请求，也会在这里排队，一个个执行，不会撑爆内存
     async with BROWSER_LOCK:
         try:
             # --- 步骤 1: [httpx] 使用全局 Client ---
             if GLOBAL_HTTP_CLIENT is None:
                  raise RuntimeError("Global HTTP Client not initialized")
 
+            logger.info(f"🔄 [步骤 1] 正访问 API: {api_url}")
             resp = await GLOBAL_HTTP_CLIENT.get(api_url, headers={'User-Agent': user_agent})
             resp.raise_for_status()
             api_data = resp.json()
 
             if api_data.get("code") != 0 or "data" not in api_data:
+                logger.warning(f"❌ API 返回无效: {api_data}")
                 await safe_reply(update, "❌ API 未返回有效链接。")
                 return
 
             domain_a = api_data["data"].strip()
             if not domain_a.startswith(('http://', 'https://')):
                 domain_a = 'http://' + domain_a
-                
+            
+            logger.info(f"✅ [步骤 1 成功] 获取到入口: {domain_a}")
+
             # --- 步骤 2: [Playwright] ---
+            logger.info("🚀 [步骤 2] 启动浏览器页面...")
             browser_context = await fastapi_app.state.browser.new_context(
                 user_agent=user_agent,
                 viewport={'width': 1280, 'height': 800}
@@ -184,6 +202,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             page.set_default_timeout(30000) # 30秒超时
 
             try:
+                logger.info(f"🌍 [步骤 2] 浏览器跳转: {domain_a}")
                 await page.goto(domain_a, wait_until="domcontentloaded")
                 try:
                     await page.wait_for_timeout(1500)
@@ -191,14 +210,17 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     pass
 
             except PlaywrightTimeoutError:
+                logger.error("❌ 浏览器访问超时")
                 await safe_reply(update, "❌ 源站响应太慢，请重试。")
                 return 
-            except Exception:
+            except Exception as e:
+                logger.error(f"❌ 浏览器访问出错: {e}")
                 await safe_reply(update, "❌ 无法连接到源站。")
                 return 
             
             domain_b = page.url 
-            
+            logger.info(f"✅ [步骤 2 成功] 落地页: {domain_b}")
+
             if "chrome-error://" in domain_b or "chromewebdata" in domain_b:
                 await safe_reply(update, "⚠️ 线路维护中，请稍后再试。")
                 return
@@ -214,11 +236,13 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 "\n💡 <i>请务必在手机自带浏览器中打开</i>"
             )
             await safe_reply(update, msg, parse_mode='HTML')
+            logger.info(f"🎉 [完成] 已发送最终链接: {final_url}")
 
         except httpx.TimeoutException:
+            logger.error("❌ HTTP请求超时")
             await safe_reply(update, "❌ 获取链接超时，对方服务器响应太慢，请重试。")
         except Exception as e:
-            logger.error(f"处理错误: {e}")
+            logger.error(f"❌ 未知处理错误: {e}")
             await safe_reply(update, "❌ 系统繁忙，请重试。")
             
         finally:
@@ -416,9 +440,9 @@ async def startup_event():
             args=launch_args
         )
         app.state.browser = BROWSER_INSTANCE
-        logger.info("Playwright 启动成功 (优化模式)")
+        logger.info("✅ Playwright 启动成功 (优化模式)")
     except Exception as e:
-        logger.error(f"Playwright 启动失败: {e}")
+        logger.error(f"❌ Playwright 启动失败: {e}")
 
     asyncio.create_task(background_scheduler())
 
