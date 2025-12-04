@@ -13,6 +13,7 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.error import BadRequest  # 引入异常类型
 
 # 引入 Playwright
 from playwright.async_api import async_playwright, Playwright, Browser, TimeoutError as PlaywrightTimeoutError
@@ -33,7 +34,7 @@ BOT_ALLOWED_CHATS: Dict[str, List[str]] = {}
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 
-# 🔥 优化：全局 HTTP 客户端 (复用 TCP 连接，极大提升速度)
+# 全局 HTTP 客户端
 GLOBAL_HTTP_CLIENT: httpx.AsyncClient | None = None
 
 # 全局图片/视频
@@ -42,7 +43,7 @@ GLOBAL_IMAGE_PATTERN: str = ""
 GLOBAL_VIDEO_MAP: Dict[str, str] = {} 
 GLOBAL_VIDEO_PATTERN: str = "" 
 
-# --- 3. 核心正则 (保持不变) ---
+# --- 3. 核心正则 ---
 UNIVERSAL_COMMAND_PATTERN = r"^(地址|安装地址|安装链接|下载地址|下载链接|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接)$"
 ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(提包|安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
 IOS_QUIT_PATTERN = r"^(苹果大退|苹果重启|苹果大退重启|苹果黑屏|苹果重开)$"
@@ -78,6 +79,7 @@ def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
         if check_id in allowed_list:
             return True 
 
+    # 降低日志级别，防止刷屏，或者保留 warning
     logger.warning(f"Bot {current_app.bot.token[-4:]} 拒绝了未授权 Chat ID: {chat_id_str}")
     return False
 
@@ -101,10 +103,31 @@ def modify_url_subdomain(url_str: str, new_sub: str) -> str:
     except Exception:
         return url_str
 
+# 🔥 新增：安全回复函数 (防崩核心)
+async def safe_reply(update: Update, text: str, parse_mode=None):
+    """
+    尝试回复消息。如果原消息被删 (BadRequest)，则尝试直接发送消息。
+    """
+    try:
+        if parse_mode:
+            await update.message.reply_text(text, parse_mode=parse_mode)
+        else:
+            await update.message.reply_text(text)
+    except BadRequest as e:
+        if "Message to be replied not found" in str(e):
+            # 原消息没了，改用 send_message 直接发到群里，不引用原消息
+            try:
+                await update.message.chat.send_message(text, parse_mode=parse_mode)
+            except Exception as e2:
+                logger.error(f"无法发送备用消息: {e2}")
+        else:
+            logger.error(f"回复时发生其他 BadRequest: {e}")
+    except Exception as e:
+        logger.error(f"回复未知错误: {e}")
+
+
 # --- 核心处理器 1 (Playwright - 通用链接) ---
 async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """ 🔥 性能优化版：复用 Client + 资源安全回收 """
-    
     if not update.message or not is_chat_allowed(context, update.message.chat_id):
         return
 
@@ -113,7 +136,8 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     fastapi_app = context.bot_data.get("fastapi_app")
     if not fastapi_app or not hasattr(fastapi_app.state, 'browser'):
-        await update.message.reply_text("❌ 服务内部错误：浏览器未启动。")
+        # 使用安全回复
+        await safe_reply(update, "❌ 服务内部错误：浏览器未启动。")
         return
 
     current_app = context.application
@@ -124,26 +148,23 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             break
             
     if not api_url:
-        await update.message.reply_text("❌ 配置错误：未找到此 Bot 的 API 地址。")
+        await safe_reply(update, "❌ 配置错误：未找到此 Bot 的 API 地址。")
         return
 
+    # 尝试发送“请稍候”提示
     try:
-        await update.message.reply_text("正在为您获取专属通用下载链接，请稍候 ...")
+        await safe_reply(update, "正在为您获取专属通用下载链接，请稍候 ...")
     except Exception:
         pass
 
-    # 通用 UA，模拟真实用户
     user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    
-    # 定义资源变量，确保 finally 能访问
     browser_context = None 
     page = None 
     
     try:
-        # --- 步骤 1: [httpx] 使用全局 Client (极速) ---
+        # --- 步骤 1: [httpx] 使用全局 Client ---
         logger.info(f"步骤 1: (Async) 正在访问 API...")
         
-        # 🔥 优化：直接使用全局 client，不再每次创建
         if GLOBAL_HTTP_CLIENT is None:
              raise RuntimeError("Global HTTP Client not initialized")
 
@@ -153,7 +174,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         if api_data.get("code") != 0 or "data" not in api_data:
             logger.error(f"API 数据无效: {api_data}")
-            await update.message.reply_text("❌ API 未返回有效链接。")
+            await safe_reply(update, "❌ API 未返回有效链接。")
             return
 
         domain_a = api_data["data"].strip()
@@ -165,19 +186,16 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # --- 步骤 2: [Playwright] 上下文隔离 ---
         logger.info(f"步骤 2: Playwright 访问...")
         
-        # 🔥 优化：使用 new_context 创建隔离环境 (隐身模式)，防止 Cookie 污染和内存泄露
         browser_context = await fastapi_app.state.browser.new_context(
             user_agent=user_agent,
             viewport={'width': 1280, 'height': 800}
         )
         
         page = await browser_context.new_page()
-        page.set_default_timeout(35000) # 35秒总超时
+        page.set_default_timeout(35000)
 
         try:
-            # domcontentloaded 比 load 快很多，足够获取 URL 跳转
             await page.goto(domain_a, wait_until="domcontentloaded")
-            # 稍微等待一下可能的 JS 跳转，但不死等
             try:
                 await page.wait_for_timeout(1500)
             except:
@@ -185,18 +203,18 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         except PlaywrightTimeoutError:
             logger.error(f"Playwright 导航超时")
-            await update.message.reply_text("❌ 源站响应太慢，请重试。")
-            return # finally 会处理关闭
+            await safe_reply(update, "❌ 源站响应太慢，请重试。")
+            return 
         except Exception as nav_err:
             logger.error(f"Playwright 导航错误: {nav_err}")
-            await update.message.reply_text("❌ 无法连接到源站。")
-            return # finally 会处理关闭
+            await safe_reply(update, "❌ 无法连接到源站。")
+            return 
         
         domain_b = page.url 
         
         if "chrome-error://" in domain_b or "chromewebdata" in domain_b:
             logger.error(f"Chrome 错误页: {domain_b}")
-            await update.message.reply_text("⚠️ 线路维护中，请稍后再试。")
+            await safe_reply(update, "⚠️ 线路维护中，请稍后再试。")
             return
 
         logger.info(f"步骤 2 成功: B -> {domain_b}")
@@ -211,17 +229,17 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"<code>{final_url}</code>" 
             "\n💡 <i>请务必在手机自带浏览器中打开</i>"
         )
-        await update.message.reply_html(msg)
+        # 🔥 使用 safe_reply 发送结果
+        await safe_reply(update, msg, parse_mode='HTML')
 
     except httpx.TimeoutException:
         logger.error(f"❌ API 请求超时")
-        await update.message.reply_text("❌ 获取链接超时，对方服务器响应太慢，请重试。")
+        await safe_reply(update, "❌ 获取链接超时，对方服务器响应太慢，请重试。")
     except Exception as e:
         logger.error(f"系统错误 ({type(e).__name__}): {e}")
-        await update.message.reply_text(f"❌ 系统繁忙，请重试。")
+        await safe_reply(update, "❌ 系统繁忙，请重试。")
         
     finally:
-        # 🔥 核心修正：无论成功失败，强制关闭页面和上下文，防止内存泄露
         if page:
             try: await page.close()
             except: pass
@@ -230,10 +248,9 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except: pass
 
 
-# --- 核心处理器 2 (安卓专用) - 保持不变 ---
+# --- 核心处理器 2 (安卓专用) ---
 async def get_android_specific_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
-    bot_token_end = context.application.bot.token[-4:]
     
     current_app = context.application
     apk_template = None
@@ -243,7 +260,7 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
             break
             
     if not apk_template:
-        await update.message.reply_text("❌ 配置错误：未找到 APK 模板。")
+        await safe_reply(update, "❌ 配置错误：未找到 APK 模板。")
         return
         
     try:
@@ -255,16 +272,19 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
             f"<code>{final_url}</code>"
             "\n💡 <i>请务必在手机自带浏览器中打开</i>"
         )
-        await update.message.reply_html(msg)
+        await safe_reply(update, msg, parse_mode='HTML')
     except Exception as e:
         logger.error(f"APK 生成错误: {e}")
 
-# --- 其他静态回复处理器 - 保持不变 ---
+# --- 其他静态回复处理器 ---
 async def send_static_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, log_msg: str, html_msg: str):
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     logger.info(f"Bot {context.application.bot.token[-4:]} {log_msg}")
-    try: await update.message.reply_html(html_msg)
-    except Exception as e: logger.error(f"发送消息失败: {e}")
+    try: 
+        # 🔥 使用 safe_reply
+        await safe_reply(update, html_msg, parse_mode='HTML')
+    except Exception as e: 
+        logger.error(f"发送消息失败: {e}")
 
 async def send_ios_quit_guide(u, c): await send_static_reply(u, c, "发送苹果大退", "📱 <b>苹果手机APP大退步骤</b>\n\n1. 上滑停留调出后台。\n2. 上滑关闭App卡片。\n3. 重新点击图标打开。")
 async def send_android_quit_guide(u, c): await send_static_reply(u, c, "发送安卓大退", "🤖 <b>安卓手机APP大退步骤</b>\n\n1. 上滑或点击多任务键进入后台。\n2. 上滑关闭App卡片。\n3. 重新打开App。")
@@ -273,18 +293,22 @@ async def send_ios_browser_guide(u, c): await send_static_reply(u, c, "发送苹
 async def send_android_tab_limit_guide(u, c): await send_static_reply(u, c, "发送安卓窗口上限", "🤖 <b>安卓窗口上限解决</b>\n\n1. 点击浏览器标签页图标(数字框)。\n2. 选择“关闭所有标签页”或手动关闭旧标签。")
 async def send_ios_tab_limit_guide(u, c): await send_static_reply(u, c, "发送苹果窗口上限", "📱 <b>苹果窗口上限解决</b>\n\n1. 长按右下角标签图标。\n2. 选择“关闭所有标签页”。")
 
-# --- 图片/视频处理器 - 保持不变 ---
+# --- 图片/视频处理器 (不做复杂处理，简单 try-except) ---
 async def send_global_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     keyword = update.message.text
     url = GLOBAL_IMAGE_MAP.get(keyword)
-    if url: await update.message.reply_photo(photo=url)
+    if url: 
+        try: await update.message.reply_photo(photo=url)
+        except Exception: pass
 
 async def send_global_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     keyword = update.message.text
     url = GLOBAL_VIDEO_MAP.get(keyword)
-    if url: await update.message.reply_video(video=url)
+    if url: 
+        try: await update.message.reply_video(video=url)
+        except Exception: pass
 
 
 # --- Setup Bot ---
@@ -310,18 +334,17 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
         msg = f"🤖 Bot #{bot_index} ({token_end}) 就绪。\n发送 链接、安卓专用、大退 等指令使用。"
         if GLOBAL_IMAGE_MAP:
             msg += "\n\n快捷图片: " + ", ".join(list(GLOBAL_IMAGE_MAP.keys())[:3])
-        await update.message.reply_html(msg)
+        await safe_reply(update, msg, parse_mode='HTML')
     
     app_instance.add_handler(CommandHandler("start", start_command))
 
-# --- FastAPI & Startup ---
+# --- FastAPI & Startup (保持不变) ---
 app = FastAPI(title="Multi-Bot Service")
 
 async def background_scheduler():
     logger.info("后台调度器启动...")
     await asyncio.sleep(10)
     while True:
-        # 🔥 优化：外层捕获异常，防止调度器因为单次错误而彻底挂掉
         try:
             now = datetime.datetime.now(datetime.timezone.utc)
             curr_hm = now.strftime("%H:%M")
@@ -347,10 +370,8 @@ async def startup_event():
     global GLOBAL_IMAGE_MAP, GLOBAL_IMAGE_PATTERN, GLOBAL_VIDEO_MAP, GLOBAL_VIDEO_PATTERN
     global GLOBAL_HTTP_CLIENT
 
-    # 🔥 初始化全局 HTTP Client
     GLOBAL_HTTP_CLIENT = httpx.AsyncClient(timeout=30.0, verify=False, limits=httpx.Limits(max_keepalive_connections=20, max_connections=50))
 
-    # 初始化 (清空)
     BOT_APPLICATIONS = {}
     BOT_API_URLS = {}
     BOT_APK_URLS = {}
@@ -359,7 +380,6 @@ async def startup_event():
     GLOBAL_IMAGE_MAP = {}
     GLOBAL_VIDEO_MAP = {}
 
-    # 加载全局资源 (图片/视频)
     for i in range(1, 11):
         k, v = os.getenv(f"IMAGE_{i}_KEYS"), os.getenv(f"IMAGE_{i}_URL")
         if k and v: 
@@ -376,7 +396,6 @@ async def startup_event():
     if GLOBAL_VIDEO_MAP:
         GLOBAL_VIDEO_PATTERN = r"^(" + "|".join([re.escape(k) for k in GLOBAL_VIDEO_MAP.keys()]) + r")$"
 
-    # 加载 Bots
     for i in range(1, 10):
         token = os.getenv(f"BOT_TOKEN_{i}")
         if token:
@@ -406,12 +425,8 @@ async def startup_event():
                 }
             logger.info(f"Bot #{i} ({token[-4:]}) 加载完成")
 
-    # 启动 Playwright
     try:
         PLAYWRIGHT_INSTANCE = await async_playwright().start()
-        # 🔥 优化：云环境防崩参数 (非常重要)
-        # --disable-dev-shm-usage: 防止 Docker/Heroku 共享内存不足崩溃
-        # --disable-gpu: 无头模式不需要 GPU，减少报错
         launch_args = [
             "--no-sandbox", 
             "--disable-setuid-sandbox", 
@@ -432,7 +447,6 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    # 🔥 关闭全局资源
     if GLOBAL_HTTP_CLIENT: 
         await GLOBAL_HTTP_CLIENT.aclose()
     if BROWSER_INSTANCE: 
