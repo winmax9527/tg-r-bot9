@@ -11,7 +11,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 🔥 4. 核心修复在这里！！！
 # 我们显式地安装 chromium，这会自动包含 headless-shell
 # 并且加上 --with-deps 确保系统库齐全
-RUN playwright install chromium --with-deps
+# 强力安装模式：不指定浏览器名，让它自动补全当前版本所需的一切
+RUN playwright install --with-deps
 
 # 5. 复制其余代码
 COPY . .
