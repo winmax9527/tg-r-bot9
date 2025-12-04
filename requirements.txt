@@ -1,7 +1,6 @@
 fastapi
 uvicorn[standard]
 python-telegram-bot
-requests
 playwright
 gunicorn
 httpx
