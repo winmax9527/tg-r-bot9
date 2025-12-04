@@ -18,4 +18,4 @@ COPY . .
 EXPOSE 10000
 
 # 启动命令 (直接复用你 Procfile 里的逻辑，但写在这里更稳)
-CMD ["gunicorn", "main:app", "--workers", "1", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:10000"]
+CMD gunicorn main:app --workers 1 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT
