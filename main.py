@@ -13,7 +13,8 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # 引入 Playwright
-from playwright.async_api import async_playwright, Playwright, Browser
+# 🔥 修改 1: 引入 TimeoutError 以便专门捕获超时
+from playwright.async_api import async_playwright, Playwright, Browser, TimeoutError as PlaywrightTimeoutError
 
 # --- 1. 配置日志记录 (Logging Setup) ---
 logging.basicConfig(
@@ -35,13 +36,11 @@ BROWSER_INSTANCE: Browser | None = None
 GLOBAL_IMAGE_MAP: Dict[str, str] = {} 
 GLOBAL_IMAGE_PATTERN: str = "" 
 
-# --- ⬇️ 新增：全局视频功能 ⬇️ ---
-GLOBAL_VIDEO_MAP: Dict[str, str] = {}  # e.g. {"视频1": "url1", "教程1": "url1"}
-GLOBAL_VIDEO_PATTERN: str = ""  # e.g. r"^(视频1|教程1)$"
-# --- ⬆️ 新增 ⬆️ ---
+# (全局视频功能)
+GLOBAL_VIDEO_MAP: Dict[str, str] = {} 
+GLOBAL_VIDEO_PATTERN: str = "" 
 
 # --- 3. 核心功能：获取动态链接 ---
-# (您 21:58 版本的所有关键字)
 UNIVERSAL_COMMAND_PATTERN = r"^(地址|安装地址|安装链接|下载地址|下载链接|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接)$"
 ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(提包|安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
 IOS_QUIT_PATTERN = r"^(苹果大退|苹果重启|苹果大退重启|苹果黑屏|苹果重开)$"
@@ -51,7 +50,6 @@ IOS_BROWSER_PATTERN = r"^(苹果浏览器手机版|苹果浏览器|苹果桌面�
 ANDROID_TAB_LIMIT_PATTERN = r"^(安卓窗口上限|窗口上限|标签上限)$"
 IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
 
-# (全局图片/视频关键字现在是动态加载的)
 
 # --- 辅助函数 ---
 
@@ -92,13 +90,11 @@ def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
 # --- ⬆️ 智能安全检查 ⬆️ ---
 
 
-# (您修改后的 4-7 位)
 def generate_universal_subdomain(min_len: int = 4, max_len: int = 7) -> str:
     """(需求 1) 生成一个 4-7 位随机长度的字符串 (仅小写)"""
     length = random.randint(min_len, max_len)
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
-# (您修改后的 5-9 位)
 def generate_android_specific_subdomain(min_len: int = 5, max_len: int = 9) -> str:
     """(需求 2) 生成一个 5-9 位随机长度的字符串 (仅小写)"""
     length = random.randint(min_len, max_len)
@@ -119,7 +115,7 @@ def modify_url_subdomain(url_str: str, new_sub: str) -> str:
         return url_str
 
 # --- 核心处理器 1 (Playwright - 通用链接) ---
-# --- 🔥 关键修复：增加 chrome-error 拦截逻辑 🔥 ---
+# --- 🔥 关键修复：优化 Playwright 访问逻辑 🔥 ---
 async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 1) - Playwright 动态链接 """
     
@@ -184,32 +180,43 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.info(f"步骤 1 成功: 获取到 域名 A -> {domain_a}") 
 
         # --- 步骤 2: [Playwright] 访问 域名 A 获取 域名 B ---
+        # 🔥🔥🔥 重点修改区域开始 🔥🔥🔥
         logger.info(f"步骤 2: (Playwright) 正在启动新页面访问 {domain_a}...")
         
         page = await fastapi_app.state.browser.new_page()
         page.set_default_timeout(40000)  # 40 秒超时
 
-        # 使用 try-except 捕获 goto 可能抛出的 Connection Refused 错误
         try:
-            response = await page.goto(domain_a, wait_until="networkidle")
+            # 优化: 改用 domcontentloaded。networkidle 对于有广告/跳转脚本的页面过于严格，极易导致超时。
+            await page.goto(domain_a, wait_until="domcontentloaded")
+            
+            # 额外等待 2 秒，给 JS 跳转一点时间 (如果页面是用 JS 进行 redirect 的)
+            await page.wait_for_timeout(2000)
+
+        except PlaywrightTimeoutError:
+            logger.error(f"❌ Playwright 导航超时 (40s): 访问 {domain_a} 耗时过长。")
+            await update.message.reply_text("❌ 链接获取失败：源站响应超时，请稍后重试。")
+            await page.close()
+            return  # ⛔️ 立即停止，防止使用无效的 URL
+
         except Exception as nav_err:
-            logger.error(f"Playwright 导航错误 (可能是DNS/服务器挂了): {nav_err}")
-            # 这里不用 return，让代码继续往下走，通过下面的 url check 来捕获
+            logger.error(f"❌ Playwright 导航错误 (可能是DNS/服务器挂了): {nav_err}")
+            await update.message.reply_text("❌ 链接获取失败：无法连接到源站。")
+            await page.close()
+            return  # ⛔️ 立即停止
         
+        # 获取当前 URL
         domain_b = page.url 
         
-        # --- 🔥 关键修复：检查是否为 Chrome 错误页 🔥 ---
-        if "chrome-error://" in domain_b or "chromewebdata" in domain_b:
-            logger.error(f"❌ 严重错误: 检测到 Chrome 内部错误页 (chrome-error://)。原因可能是域名 {domain_a} 解析失败或正在迁移。")
+        # --- 🔥 检查 Chrome 错误页 🔥 ---
+        if "chrome-error://" in domain_b or "chromewebdata" in domain_b or domain_b == "about:blank":
+            logger.error(f"❌ 严重错误: 获取到的 URL 无效或为错误页: {domain_b}")
             await update.message.reply_text("⚠️ **系统提示：**\n线路维护中**，暂时无法生成有效链接。\n请稍后（约1-2分钟）再试。")
+            await page.close() # 记得关闭
             return
-        
-        # 检查 HTTP 状态码 (如果有响应对象)
-        # if response and response.status >= 400:
-        #     logger.warning(f"页面返回了错误状态码: {response.status}")
-        #     # 某些跳转可能返回 404 但 URL 变了，所以这里仅记录，不强制拦截，主要靠上面的 chrome-error 拦截
 
-        logger.info(f"步骤 2 成功: 获取到 域名 B (完整): {domain_b}")
+        logger.info(f"步骤 2 成功: 获取到跳转后链接 -> {domain_b}")
+        # 🔥🔥🔥 重点修改区域结束 🔥🔥🔥
 
         # --- 步骤 3: 修改 域名 B 的二级域名 ---
         logger.info(f"步骤 3: 正在为 {domain_b} 生成 4-7 位随机二级域名...")
@@ -226,16 +233,16 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         await update.message.reply_html(message_html)
 
+        # 正常结束后关闭页面
+        await page.close()
+
     except Exception as e:
-        logger.error(f"处理 get_universal_link (Playwright) 时发生错误: {e}")
-        if "Timeout" in str(e):
-            await update.message.reply_text("❌ 链接获取失败：目标网页加载超时（超过 40 秒）。")
-        else:
-            await update.message.reply_text(f"❌ 链接获取失败：系统繁忙，请稍后再试。")
-    finally:
+        logger.error(f"处理 get_universal_link (Playwright) 时发生未知错误: {e}")
+        await update.message.reply_text(f"❌ 链接获取失败：系统繁忙，请稍后再试。")
+        # 确保页面关闭
         if page:
-            await page.close() 
-            logger.info("Playwright 页面已关闭。")
+            await page.close()
+
 
 # --- 核心处理器 2 (安卓专用链接) ---
 async def get_android_specific_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -413,7 +420,7 @@ async def send_ios_tab_limit_guide(update: Update, context: ContextTypes.DEFAULT
         logger.error(f"发送 [苹果窗口上限] 指南时失败: {e}")
 
 
-# --- ⬇️ 新增：核心处理器 9 (全局图片) ⬇️ ---
+# --- 核心处理器 9 (全局图片) ---
 async def send_global_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 9 - 静态回复 全局图片) """
     
@@ -441,9 +448,8 @@ async def send_global_image(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     except Exception as e:
         logger.error(f"发送 [全局图片] ({keyword}) 时失败: {e}")
         await update.message.reply_text(f"❌ 发送图片时发生内部错误。")
-# --- ⬆️ 新增 ⬆️ ---
 
-# --- ⬇️ 新增：核心处理器 10 (全局视频) ⬇️ ---
+# --- 核心处理器 10 (全局视频) ---
 async def send_global_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 10 - 静态回复 全局视频) """
     
@@ -470,7 +476,6 @@ async def send_global_video(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     except Exception as e:
         logger.error(f"发送 [全局视频] ({keyword}) 时失败: {e}")
         await update.message.reply_text(f"❌ 发送视频时发生内部错误。")
-# --- ⬆️ 新增 ⬆️ ---
 
 
 # --- 4. Bot 启动与停止逻辑 ---
@@ -496,15 +501,13 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
     # (需求 8) 处理器
     app_instance.add_handler( MessageHandler( filters.TEXT & filters.Regex(IOS_TAB_LIMIT_PATTERN), send_ios_tab_limit_guide ))
     
-    # --- ⬇️ 新增：(需求 9) 全局图片处理器 ⬇️ ---
+    # --- (需求 9) 全局图片处理器 ---
     if GLOBAL_IMAGE_PATTERN:
         app_instance.add_handler( MessageHandler( filters.TEXT & filters.Regex(GLOBAL_IMAGE_PATTERN), send_global_image ))
-    # --- ⬆️ 新增 ⬆️ ---
 
-    # --- ⬇️ 新增：(需求 10) 全局视频处理器 ⬇️ ---
+    # --- (需求 10) 全局视频处理器 ---
     if GLOBAL_VIDEO_PATTERN:
         app_instance.add_handler( MessageHandler( filters.TEXT & filters.Regex(GLOBAL_VIDEO_PATTERN), send_global_video ))
-    # --- ⬆️ 新增 ⬆️ ---
     
     
     async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -514,18 +517,17 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
             return  # 不在白名单，立即停止
         # --- ⬆️ 智能安全检查 ⬆️ ---
 
-        # (您修改后的 /start 消息)
         start_message = (f"🤖 Bot #{bot_index} (尾号: {token_end}) 已准备就绪。\n"
-                        f"- 发送 `链接`、`地址` 等获取通用链接。\n"
-                        f"- 发送 `安卓专用` 等获取 APK 链接。\n"
-                        f"- 发送 `苹果大退` 获取 iOS 重启指南。\n"
-                        f"- 发送 `安卓大退` 获取 Android 重启指南。\n"
-                        f"- 发送 `安卓浏览器手机版` 获取安卓浏览器设置指南。\n"
-                        f"- 发送 `苹果浏览器手机版` 获取苹果浏览器设置指南。\n"
-                        f"- 发送 `安卓窗口上限` 获取安卓窗口管理指南。\n"
-                        f"- 发送 `苹果窗口上限` 获取苹果窗口管理指南。")
+                         f"- 发送 `链接`、`地址` 等获取通用链接。\n"
+                         f"- 发送 `安卓专用` 等获取 APK 链接。\n"
+                         f"- 发送 `苹果大退` 获取 iOS 重启指南。\n"
+                         f"- 发送 `安卓大退` 获取 Android 重启指南。\n"
+                         f"- 发送 `安卓浏览器手机版` 获取安卓浏览器设置指南。\n"
+                         f"- 发送 `苹果浏览器手机版` 获取苹果浏览器设置指南。\n"
+                         f"- 发送 `安卓窗口上限` 获取安卓窗口管理指南。\n"
+                         f"- 发送 `苹果窗口上限` 获取苹果窗口管理指南。")
         
-        # --- ⬇️ 新增：动态添加图片/视频关键字到 /start ⬇️ ---
+        # --- 动态添加图片/视频关键字到 /start ---
         if GLOBAL_IMAGE_MAP:
             start_message += "\n\n<b>--- 快捷图片 ---</b>"
             for key in list(GLOBAL_IMAGE_MAP.keys())[:3]: # (只显示前 3 个)
@@ -535,7 +537,6 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
             start_message += "\n\n<b>--- 快捷视频 ---</b>"
             for key in list(GLOBAL_VIDEO_MAP.keys())[:3]: # (只显示前 3 个)
                 start_message += f"\n- 发送 `{key}` 获取视频"
-        # --- ⬆️ 新增 ⬆️ ---
 
         await update.message.reply_html(start_message)
     
@@ -547,7 +548,7 @@ app = FastAPI(title="Multi-Bot Playwright Service")
 
 # --- 6. 应用启动/关闭事件 ---
 
-# --- ⬇️ 后台调度器 (已修复 <br> Bug) ⬇️ ---
+# --- ⬇️ 后台调度器 ⬇️ ---
 async def background_scheduler():
     """每60秒检查一次是否有到期的定时任务"""
     logger.info("后台调度器已启动... (每 60 秒检查一次)")
@@ -576,19 +577,16 @@ async def background_scheduler():
                         application = BOT_APPLICATIONS.get(webhook_path)
                         if application:
                             chat_ids_list = schedule["chat_ids"] 
-                            message_raw = schedule["message"] # <-- (来自 Env Var, 可能包含 <br>)
+                            message_raw = schedule["message"]
                             
-                            # --- ⬇️ 关键修复：替换 <br> 标签 ⬇️ ---
+                            # --- 替换 <br> 标签 ---
                             message_formatted = message_raw.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
-                            # --- ⬆️ 关键修复 ⬆️ ---
                             
                             logger.info(f"Bot (路径: {webhook_path}) 正在发送定时消息到 {len(chat_ids_list)} 个 Chats...")
                             
                             for chat_id in chat_ids_list: 
                                 try:
-                                    # --- ⬇️ 关键修复：发送格式化后的消息 ⬇️ ---
                                     await application.bot.send_message(chat_id=chat_id, text=message_formatted, parse_mode='HTML') 
-                                    # --- ⬆️ 关键修复 ⬆️ ---
                                     logger.info(f"Bot (路径: {webhook_path}) 定时消息 -> {chat_id} 发送成功。")
                                 except Exception as e:
                                     logger.error(f"Bot (路径: {webhook_path}) 发送定时消息 -> {chat_id} 失败: {e}")
@@ -609,27 +607,23 @@ async def startup_event():
     """在 FastAPI 启动时：1. 初始化 Bot 2. 启动 Playwright 3. 启动调度器"""
     
     global BOT_APPLICATIONS, BOT_API_URLS, BOT_APK_URLS, BOT_SCHEDULES, BOT_ALLOWED_CHATS, PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
-    # --- ⬇️ 新增：初始化全局字典 ⬇️ ---
     global GLOBAL_IMAGE_MAP, GLOBAL_IMAGE_PATTERN, GLOBAL_VIDEO_MAP, GLOBAL_VIDEO_PATTERN
-    # --- ⬆️ 新增 ⬆️ ---
 
     BOT_APPLICATIONS = {}
     BOT_API_URLS = {}
     BOT_APK_URLS = {}
     BOT_SCHEDULES = {} 
-    BOT_ALLOWED_CHATS = {} # <-- 智能安全白名单
-    # --- ⬇️ 新增：初始化全局字典 ⬇️ ---
+    BOT_ALLOWED_CHATS = {} 
     GLOBAL_IMAGE_MAP = {}
     GLOBAL_IMAGE_PATTERN = ""
     GLOBAL_VIDEO_MAP = {}
     GLOBAL_VIDEO_PATTERN = ""
-    # --- ⬆️ 新增 ⬆️ ---
 
     logger.info("应用启动中... 正在查找所有 Bot 和全局配置。")
 
-    # --- ⬇️ 新增：首先加载全局图片配置 ⬇️ ---
+    # --- 加载全局图片配置 ---
     all_global_image_keys = []
-    for i in range(1, 11): # 最多支持 10 个全局图片 (IMAGE_1 ... IMAGE_10)
+    for i in range(1, 11): 
         keys_name = f"IMAGE_{i}_KEYS"
         url_name = f"IMAGE_{i}_URL"
         
@@ -645,7 +639,7 @@ async def startup_event():
                 all_global_image_keys.extend(keys_list)
             else:
                 logger.warning(f"DIAGNOSTIC: {keys_name} 已设置，但关键字列表为空。")
-        elif (keys_str or url_value) and not (keys_str and url_value): # (只设置了其中一个)
+        elif (keys_str or url_value) and not (keys_str and url_value): 
              logger.warning(f"DIAGNOSTIC: 必须同时提供 {keys_name} 和 {url_name} 才能加载图片 {i}。")
 
     if all_global_image_keys:
@@ -654,11 +648,10 @@ async def startup_event():
         logger.info(f"✅ 成功构建 [全局图片 Regex 模式]: {GLOBAL_IMAGE_PATTERN}")
     else:
         logger.info("DIAGNOSTIC: 未配置任何全局图片。")
-    # --- ⬆️ 新增 ⬆️ ---
 
-    # --- ⬇️ 新增：加载全局视频配置 ⬇️ ---
+    # --- 加载全局视频配置 ---
     all_global_video_keys = []
-    for i in range(1, 11): # 最多支持 10 个全局视频 (VIDEO_1 ... VIDEO_10)
+    for i in range(1, 11):
         keys_name = f"VIDEO_{i}_KEYS"
         url_name = f"VIDEO_{i}_URL"
         
@@ -674,7 +667,7 @@ async def startup_event():
                 all_global_video_keys.extend(keys_list)
             else:
                 logger.warning(f"DIAGNOSTIC: {keys_name} 已设置，但关键字列表为空。")
-        elif (keys_str or url_value) and not (keys_str and url_value): # (只设置了其中一个)
+        elif (keys_str or url_value) and not (keys_str and url_value):
              logger.warning(f"DIAGNOSTIC: 必须同时提供 {keys_name} 和 {url_name} 才能加载视频 {i}。")
 
     if all_global_video_keys:
@@ -683,10 +676,9 @@ async def startup_event():
         logger.info(f"✅ 成功构建 [全局视频 Regex 模式]: {GLOBAL_VIDEO_PATTERN}")
     else:
         logger.info("DIAGNOSTIC: 未配置任何全局视频。")
-    # --- ⬆️ 新增 ⬆️ ---
 
 
-    # --- ⬇️ 接下来，加载所有 Bot (和之前一样) ⬇️ ---
+    # --- 加载所有 Bot ---
     for i in range(1, 10): 
         token_name = f"BOT_TOKEN_{i}"
         token_value = os.getenv(token_name)
@@ -700,7 +692,6 @@ async def startup_event():
             
             await application.initialize()
             
-            # (setup_bot 现在会*自动*添加全局图片/视频处理器)
             setup_bot(application, i)
             
             webhook_path = f"bot{i}_webhook"
@@ -758,8 +749,6 @@ async def startup_event():
             else:
                 logger.warning(f"DIAGNOSTIC: Bot #{i} 未找到 {allowed_chats_name}。此 Bot 将 [不会] 响应任何群组或私聊的指令。")
                 
-            # (删除了每-Bot-图片加载)
-                
             logger.info(f"Bot #{i} (尾号: {token_value[-4:]}) 已创建并初始化。监听路径: /{webhook_path}")
 
     if not BOT_APPLICATIONS:
@@ -767,7 +756,7 @@ async def startup_event():
     else:
         logger.info(f"✅ 成功初始化 {len(BOT_APPLICATIONS)} 个 Bot 实例。")
 
-    # 6.2 启动 Playwright
+    # 启动 Playwright
     logger.info("正在启动全局 Playwright 实例...")
     try:
         PLAYWRIGHT_INSTANCE = await async_playwright().start()
@@ -799,7 +788,7 @@ async def shutdown_event():
         logger.info("Playwright 实例已停止。")
     logger.info("应用关闭完成。")
 
-# --- 7. 动态 Webhook 路由 (与之前相同, 100% 正确) ---
+# --- 7. 动态 Webhook 路由 ---
 @app.post("/{webhook_path}")
 async def handle_webhook(webhook_path: str, request: Request):
     if webhook_path not in BOT_APPLICATIONS:
@@ -815,7 +804,7 @@ async def handle_webhook(webhook_path: str, request: Request):
         logger.error(f"处理 Webhook 请求失败 (路径: /{webhook_path})：{e}")
         return Response(status_code=500) 
 
-# --- 8. 健康检查路由 (与之前相同, 100% 正确) ---
+# --- 8. 健康检查路由 ---
 @app.get("/")
 async def root():
     browser_status = "未运行"
@@ -844,8 +833,8 @@ async def root():
         "message": "Telegram Multi-Bot (Playwright JS + Scheduler + Security) service is running.",
         "browser_status": browser_status,
         "active_bots_count": len(BOT_APPLICATIONS),
-        "global_images_loaded": len(GLOBAL_IMAGE_MAP), # <-- 新增
-        "global_videos_loaded": len(GLOBAL_VIDEO_MAP), # <-- 新增
+        "global_images_loaded": len(GLOBAL_IMAGE_MAP), 
+        "global_videos_loaded": len(GLOBAL_VIDEO_MAP), 
         "active_bots_info": active_bots_info
     }
     return status
