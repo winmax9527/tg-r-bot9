@@ -2,10 +2,10 @@ import os
 import logging
 import asyncio
 import re
-import requests # 用于快速获取域名 A
+import requests  # 用于快速获取域名 A
 import random
 import string
-import datetime # <-- 用于定时任务
+import datetime  # <-- 用于定时任务
 from urllib.parse import urlparse, urlunparse
 from typing import List, Dict, Any 
 from fastapi import FastAPI, Request, Response
@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 BOT_APPLICATIONS: Dict[str, Application] = {}
 BOT_API_URLS: Dict[str, str] = {}
 BOT_APK_URLS: Dict[str, str] = {}
-BOT_SCHEDULES: Dict[str, Dict[str, Any]] = {} # <-- (保留) 定时任务
-BOT_ALLOWED_CHATS: Dict[str, List[str]] = {} # <-- (保留) 安全白名单
+BOT_SCHEDULES: Dict[str, Dict[str, Any]] = {}  # <-- (保留) 定时任务
+BOT_ALLOWED_CHATS: Dict[str, List[str]] = {}  # <-- (保留) 安全白名单
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 
@@ -36,8 +36,8 @@ GLOBAL_IMAGE_MAP: Dict[str, str] = {}
 GLOBAL_IMAGE_PATTERN: str = "" 
 
 # --- ⬇️ 新增：全局视频功能 ⬇️ ---
-GLOBAL_VIDEO_MAP: Dict[str, str] = {} # e.g. {"视频1": "url1", "教程1": "url1"}
-GLOBAL_VIDEO_PATTERN: str = "" # e.g. r"^(视频1|教程1)$"
+GLOBAL_VIDEO_MAP: Dict[str, str] = {}  # e.g. {"视频1": "url1", "教程1": "url1"}
+GLOBAL_VIDEO_PATTERN: str = ""  # e.g. r"^(视频1|教程1)$"
 # --- ⬆️ 新增 ⬆️ ---
 
 # --- 3. 核心功能：获取动态链接 ---
@@ -55,7 +55,7 @@ IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
 
 # --- 辅助函数 ---
 
-# --- ⬇️ 智能安全检查 (我们最终的修复版) ⬇️ ---
+# --- ⬇️ 智能安全检查 ⬇️ ---
 def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
     """
     真正的智能安全检查：
@@ -84,7 +84,7 @@ def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
     # 3. 检查任何一个变体是否存在于白名单中
     for check_id in possible_ids_to_check:
         if check_id in allowed_list:
-            return True # 匹配成功！
+            return True  # 匹配成功！
 
     # 4. 如果所有变体都失败了，则拒绝
     logger.warning(f"Bot (尾号: {current_app.bot.token[-4:]}) 收到来自 [未授权] Chat ID: {chat_id_str} (已检查 {possible_ids_to_check}) 的请求。已忽略。")
@@ -119,12 +119,13 @@ def modify_url_subdomain(url_str: str, new_sub: str) -> str:
         return url_str
 
 # --- 核心处理器 1 (Playwright - 通用链接) ---
+# --- 🔥 关键修复：增加 chrome-error 拦截逻辑 🔥 ---
 async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ (需求 1) - Playwright 动态链接 """
     
     # --- ⬇️ 智能安全检查 ⬇️ ---
     if not update.message or not is_chat_allowed(context, update.message.chat_id):
-        return # 不在白名单，立即停止
+        return  # 不在白名单，立即停止
     # --- ⬆️ 智能安全检查 ⬆️ ---
 
     bot_token_end = context.application.bot.token[-4:]
@@ -144,13 +145,13 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if app_instance is current_app:
             api_url_for_this_bot = BOT_API_URLS.get(path)
             break
-    
+            
     if not api_url_for_this_bot:
         logger.error(f"Bot (尾号: {bot_token_end}) 无法找到其配置的 API URL！")
         await update.message.reply_text("❌ 服务配置错误：未找到此 Bot 的 API 地址。")
         return
 
-    # 3. 发送“处理中”提示 (您修改后的)
+    # 3. 发送“处理中”提示
     try:
         await update.message.reply_text("正在为您获取专属通用下载链接，请稍候 ...")
     except Exception as e:
@@ -186,21 +187,37 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.info(f"步骤 2: (Playwright) 正在启动新页面访问 {domain_a}...")
         
         page = await fastapi_app.state.browser.new_page()
-        page.set_default_timeout(40000) # 40 秒超时
+        page.set_default_timeout(40000)  # 40 秒超时
 
-        await page.goto(domain_a, wait_until="networkidle") 
+        # 使用 try-except 捕获 goto 可能抛出的 Connection Refused 错误
+        try:
+            response = await page.goto(domain_a, wait_until="networkidle")
+        except Exception as nav_err:
+            logger.error(f"Playwright 导航错误 (可能是DNS/服务器挂了): {nav_err}")
+            # 这里不用 return，让代码继续往下走，通过下面的 url check 来捕获
         
         domain_b = page.url 
+        
+        # --- 🔥 关键修复：检查是否为 Chrome 错误页 🔥 ---
+        if "chrome-error://" in domain_b or "chromewebdata" in domain_b:
+            logger.error(f"❌ 严重错误: 检测到 Chrome 内部错误页 (chrome-error://)。原因可能是域名 {domain_a} 解析失败或正在迁移。")
+            await update.message.reply_text("⚠️ **系统提示：**\n线路维护中**，暂时无法生成有效链接。\n请稍后（约1-2分钟）再试。")
+            return
+        
+        # 检查 HTTP 状态码 (如果有响应对象)
+        # if response and response.status >= 400:
+        #     logger.warning(f"页面返回了错误状态码: {response.status}")
+        #     # 某些跳转可能返回 404 但 URL 变了，所以这里仅记录，不强制拦截，主要靠上面的 chrome-error 拦截
+
         logger.info(f"步骤 2 成功: 获取到 域名 B (完整): {domain_b}")
 
-        # --- 步骤 3: 修改 域名 B 的二级域名 (您修改后的 4-7位) ---
+        # --- 步骤 3: 修改 域名 B 的二级域名 ---
         logger.info(f"步骤 3: 正在为 {domain_b} 生成 4-7 位随机二级域名...")
-        random_sub = generate_universal_subdomain() # 4-7 位
+        random_sub = generate_universal_subdomain()  # 4-7 位
         final_modified_url = modify_url_subdomain(domain_b, random_sub)
         logger.info(f"步骤 3 成功: 最终 URL -> {final_modified_url}")
 
        # --- 步骤 4: 发送最终 URL (点击复制版) ---
-        # 使用 HTML 的 <code> 标签，用户点击链接文本会自动复制
         message_html = (
             "✅ <b>您的专属通用下载链接已生成！</b>\n"
             "👇 <b>点击下方链接即可复制：</b>\n"
@@ -208,12 +225,13 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "\n💡 <i>请务必在手机自带浏览器中打开</i>"
         )
         await update.message.reply_html(message_html)
+
     except Exception as e:
         logger.error(f"处理 get_universal_link (Playwright) 时发生错误: {e}")
         if "Timeout" in str(e):
             await update.message.reply_text("❌ 链接获取失败：目标网页加载超时（超过 40 秒）。")
         else:
-            await update.message.reply_text(f"❌ 链接获取失败：{type(e).__name__}。")
+            await update.message.reply_text(f"❌ 链接获取失败：系统繁忙，请稍后再试。")
     finally:
         if page:
             await page.close() 
@@ -225,7 +243,7 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
 
     # --- ⬇️ 智能安全检查 ⬇️ ---
     if not update.message or not is_chat_allowed(context, update.message.chat_id):
-        return # 不在白名单，立即停止
+        return  # 不在白名单，立即停止
     # --- ⬆️ 智能安全检查 ⬆️ ---
 
     bot_token_end = context.application.bot.token[-4:]
@@ -236,7 +254,7 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
     apk_template = None
     for path, app_instance in BOT_APPLICATIONS.items():
         if app_instance is current_app:
-            apk_template = BOT_APK_URLS.get(path) # 从新字典中查找
+            apk_template = BOT_APK_URLS.get(path)  # 从新字典中查找
             break
             
     if not apk_template:
@@ -263,10 +281,6 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         logger.error(f"处理 get_android_specific_link 时发生错误: {e}")
         await update.message.reply_text(f"❌ 处理安卓链接时发生内部错误。")
-
-# --- (指南 处理器 3, 4, 5, 6, 7, 8) ---
-# ... (所有 6 个指南处理器: send_ios_quit_guide, send_android_quit_guide, 等等... 保持不变)
-# ... (为节省篇幅，我在这里省略了它们，但它们在下面的完整代码中)
 
 # --- 核心处理器 3 (苹果重启指南) ---
 async def send_ios_quit_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -405,7 +419,7 @@ async def send_global_image(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     # --- ⬇️ 智能安全检查 ⬇️ ---
     if not update.message or not is_chat_allowed(context, update.message.chat_id):
-        return # 不在白名单，立即停止
+        return  # 不在白名单，立即停止
     # --- ⬆️ 智能安全检查 ⬆️ ---
 
     bot_token_end = context.application.bot.token[-4:]
@@ -435,7 +449,7 @@ async def send_global_video(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     # --- ⬇️ 智能安全检查 ⬇️ ---
     if not update.message or not is_chat_allowed(context, update.message.chat_id):
-        return # 不在白名单，立即停止
+        return  # 不在白名单，立即停止
     # --- ⬆️ 智能安全检查 ⬆️ ---
 
     bot_token_end = context.application.bot.token[-4:]
@@ -497,19 +511,19 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
         
         # --- ⬇️ 智能安全检查 ⬇️ ---
         if not update.message or not is_chat_allowed(context, update.message.chat_id):
-            return # 不在白名单，立即停止
+            return  # 不在白名单，立即停止
         # --- ⬆️ 智能安全检查 ⬆️ ---
 
         # (您修改后的 /start 消息)
         start_message = (f"🤖 Bot #{bot_index} (尾号: {token_end}) 已准备就绪。\n"
-                       f"- 发送 `链接`、`地址` 等获取通用链接。\n"
-                       f"- 发送 `安卓专用` 等获取 APK 链接。\n"
-                       f"- 发送 `苹果大退` 获取 iOS 重启指南。\n"
-                       f"- 发送 `安卓大退` 获取 Android 重启指南。\n"
-                       f"- 发送 `安卓浏览器手机版` 获取安卓浏览器设置指南。\n"
-                       f"- 发送 `苹果浏览器手机版` 获取苹果浏览器设置指南。\n"
-                       f"- 发送 `安卓窗口上限` 获取安卓窗口管理指南。\n"
-                       f"- 发送 `苹果窗口上限` 获取苹果窗口管理指南。")
+                        f"- 发送 `链接`、`地址` 等获取通用链接。\n"
+                        f"- 发送 `安卓专用` 等获取 APK 链接。\n"
+                        f"- 发送 `苹果大退` 获取 iOS 重启指南。\n"
+                        f"- 发送 `安卓大退` 获取 Android 重启指南。\n"
+                        f"- 发送 `安卓浏览器手机版` 获取安卓浏览器设置指南。\n"
+                        f"- 发送 `苹果浏览器手机版` 获取苹果浏览器设置指南。\n"
+                        f"- 发送 `安卓窗口上限` 获取安卓窗口管理指南。\n"
+                        f"- 发送 `苹果窗口上限` 获取苹果窗口管理指南。")
         
         # --- ⬇️ 新增：动态添加图片/视频关键字到 /start ⬇️ ---
         if GLOBAL_IMAGE_MAP:
