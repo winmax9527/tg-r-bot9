@@ -8,7 +8,7 @@ import datetime
 from urllib.parse import urlparse
 from typing import List, Dict, Any 
 
-# 🔥 修改 1: 引入 httpx 替代 requests
+# 🔥 核心依赖：httpx (异步请求)
 import httpx 
 
 from fastapi import FastAPI, Request, Response
@@ -101,7 +101,7 @@ def modify_url_subdomain(url_str: str, new_sub: str) -> str:
 
 # --- 核心处理器 1 (Playwright - 通用链接) ---
 async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """ 🔥 修复版：使用 httpx 异步请求，防止卡死服务器 """
+    """ 🔥 终极优化版：httpx 异步 + 30秒超时 + 完善的错误处理 """
     
     if not update.message or not is_chat_allowed(context, update.message.chat_id):
         return
@@ -123,7 +123,6 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             break
             
     if not api_url:
-        # 找不到配置时，明确提示，不要卡住
         logger.error(f"Bot {bot_token_end} 缺少 API URL 配置！")
         await update.message.reply_text("❌ 配置错误：未找到此 Bot 的 API 地址。")
         return
@@ -133,15 +132,15 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception:
         pass
 
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36Chrome/91.0.4472.124 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
     page = None 
     
     try:
         # --- 步骤 1: [httpx] 异步获取 ---
-        # 🔥 关键修改：httpx 不会阻塞整个程序，即使 API 慢，其他 Bot 也能正常工作
-        logger.info(f"步骤 1: (Async) 正在访问 API...")
+        # 🔥 优化：超时时间设为 30.0 秒，应对慢速 API
+        logger.info(f"步骤 1: (Async) 正在访问 API (Timeout=30s)...")
         
-        async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
             resp = await client.get(api_url, headers=headers)
             resp.raise_for_status()
             api_data = resp.json()
@@ -163,7 +162,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         page.set_default_timeout(40000)
 
         try:
-            # domcontentloaded 比 networkidle 快且不易超时
+            # domcontentloaded 足够快
             await page.goto(domain_a, wait_until="domcontentloaded")
             await page.wait_for_timeout(2000) # 缓冲
 
@@ -201,12 +200,17 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_html(msg)
         await page.close()
 
-    except httpx.ReadTimeout:
-        logger.error("❌ API 请求超时 (httpx)")
-        await update.message.reply_text("❌ 获取链接超时，请重试。")
+    # 🔥 优化：捕获所有类型的超时错误 (ConnectTimeout, ReadTimeout 等)
+    except httpx.TimeoutException as e:
+        logger.error(f"❌ API 请求超时 (httpx): {e}")
+        await update.message.reply_text("❌ 获取链接超时(30s)，对方服务器响应太慢，请重试。")
         if page: await page.close()
+
+    # 🔥 优化：打印出具体的错误类型，不再显示“未知错误”
     except Exception as e:
-        logger.error(f"未知错误: {e}")
+        logger.error(f"系统错误 ({type(e).__name__}): {e}")
+        if "Timed out" not in str(e):
+             await update.message.reply_text(f"❌ 系统繁忙，请重试。")
         if page: await page.close()
 
 
@@ -241,14 +245,13 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         logger.error(f"APK 生成错误: {e}")
 
-# --- 其他静态回复处理器 (保持简洁) ---
+# --- 其他静态回复处理器 ---
 async def send_static_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, log_msg: str, html_msg: str):
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     logger.info(f"Bot {context.application.bot.token[-4:]} {log_msg}")
     try: await update.message.reply_html(html_msg)
     except Exception as e: logger.error(f"发送消息失败: {e}")
 
-# 包装具体的静态处理器
 async def send_ios_quit_guide(u, c): await send_static_reply(u, c, "发送苹果大退", "📱 <b>苹果手机APP大退步骤</b>\n\n1. 上滑停留调出后台。\n2. 上滑关闭App卡片。\n3. 重新点击图标打开。")
 async def send_android_quit_guide(u, c): await send_static_reply(u, c, "发送安卓大退", "🤖 <b>安卓手机APP大退步骤</b>\n\n1. 上滑或点击多任务键进入后台。\n2. 上滑关闭App卡片。\n3. 重新打开App。")
 async def send_android_browser_guide(u, c): await send_static_reply(u, c, "发送安卓浏览器", "🤖 <b>安卓浏览器设置手机版</b>\n\n1. 打开浏览器菜单(≡或⋮)。\n2. 找到“桌面版”或“电脑模式”。\n3. <b>取消勾选</b>它。")
