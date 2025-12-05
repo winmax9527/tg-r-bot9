@@ -345,25 +345,52 @@ def safe_calculate(expression: str):
     except Exception:
         return None # 其他错误忽略
 
-# --- 🔥 [新增] 计算器 Bot 设置 ---
+# --- 🔥 [修改后] 计算器 Bot 设置 (支持连续计算) ---
 def setup_calculator_bot(app_instance: Application) -> None:
     """初始化计算器 Bot 的 Handler"""
     
     async def calc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await safe_reply(update, "👋 我是智能计算器。\n直接发送算式（例如 `100 * 5`），我帮你计算。")
+        await safe_reply(update, "👋 我是智能计算器。\n\n1️⃣ 发送算式 (如 `100 * 5`)\n2️⃣ 回复我的结果并发送 `*2` 可继续计算。")
 
     async def calc_handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not update.message or not update.message.text: return
-        text = update.message.text.strip()
-        # 尝试计算
-        result = safe_calculate(text)
+        
+        user_text = update.message.text.strip()
+        final_expression = user_text
+
+        # --- 🔥 核心逻辑：检测是否为“回复续算” ---
+        # 如果这条消息是回复(Reply)别人的，且开头是运算符 (+ - * / ^)
+        if update.message.reply_to_message and update.message.reply_to_message.text:
+            # 只有当用户输入看起来像补充算式时 (例如 "*100", "/2", "+50")
+            if re.match(r'^[\+\-\*\/\^]', user_text):
+                reply_text = update.message.reply_to_message.text
+                
+                # 1. 尝试从 Bot 的标准回复格式中提取数字 "🔢 结果: 123.45"
+                # 正则解释：找 "结果:" 后面的数字，支持负数和小数
+                match = re.search(r"结果:\s*(-?\d+(\.\d+)?)", reply_text)
+                
+                previous_num = None
+                if match:
+                    previous_num = match.group(1)
+                
+                # 2. 如果没找到标准格式，尝试直接看那条消息是不是纯数字 (比如用户回复自己发的数字)
+                elif re.match(r'^-?\d+(\.\d+)?$', reply_text.strip()):
+                    previous_num = reply_text.strip()
+
+                # 如果成功提取到了上一次的数字，拼接算式
+                if previous_num:
+                    final_expression = f"{previous_num}{user_text}"
+                    logger.info(f"🔗 触发连续计算: {final_expression}")
+
+        # --- 计算 ---
+        result = safe_calculate(final_expression)
         if result:
+            # 这里引用(reply)用户的新消息，形成对话链
             await safe_reply(update, result)
 
     app_instance.add_handler(CommandHandler("start", calc_start))
     # 过滤掉命令，只处理纯文本
     app_instance.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), calc_handle_message))
-
 
 # --- Setup Bot (原有) ---
 def setup_bot(app_instance: Application, bot_index: int) -> None:
