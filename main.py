@@ -391,7 +391,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
                 reply_text = update.message.reply_to_message.text
                 
                 # 1. 尝试提取 "🔢 结果: 123"
-                match = re.search(r"结果:\s*(-?\d+(\.\d+)?)", reply_text)xf
+                match = re.search(r"结果:\s*(-?\d+(\.\d+)?)", reply_text)
                 
                 previous_num = None
                 if match:
