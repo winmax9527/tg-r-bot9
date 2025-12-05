@@ -18,6 +18,9 @@ from telegram.error import BadRequest
 # 引入 Playwright
 from playwright.async_api import async_playwright, Playwright, Browser, TimeoutError as PlaywrightTimeoutError
 
+# 🔥 [新增] 引入安全计算库
+from simpleeval import simple_eval
+
 # ==============================================================================
 # 1. 日志配置 (优化部分：降噪模式)
 # ==============================================================================
@@ -318,7 +321,51 @@ async def send_global_video(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         except Exception: pass
 
 
-# --- Setup Bot ---
+# --- 🔥 [新增] 计算器逻辑 ---
+def safe_calculate(expression: str):
+    """安全计算逻辑"""
+    try:
+        # 清理非法字符，只允许数字和数学符号
+        if not re.match(r'^[\d\+\-\*\/\(\)\.\s\%\^]+$', expression):
+            return None # 不是算式，不回复
+            
+        # 预处理符号
+        expression = expression.replace('×', '*').replace('÷', '/').replace('^', '**')
+        
+        # 长度限制，防止DoS
+        if len(expression) > 100:
+            return "❌ 算式太长了。"
+
+        result = simple_eval(expression)
+        return f"🔢 结果: {result}"
+    except SyntaxError:
+        return "❌ 格式错误。"
+    except ZeroDivisionError:
+        return "❌ 不能除以零。"
+    except Exception:
+        return None # 其他错误忽略
+
+# --- 🔥 [新增] 计算器 Bot 设置 ---
+def setup_calculator_bot(app_instance: Application) -> None:
+    """初始化计算器 Bot 的 Handler"""
+    
+    async def calc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await safe_reply(update, "👋 我是智能计算器。\n直接发送算式（例如 `100 * 5`），我帮你计算。")
+
+    async def calc_handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message or not update.message.text: return
+        text = update.message.text.strip()
+        # 尝试计算
+        result = safe_calculate(text)
+        if result:
+            await safe_reply(update, result)
+
+    app_instance.add_handler(CommandHandler("start", calc_start))
+    # 过滤掉命令，只处理纯文本
+    app_instance.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), calc_handle_message))
+
+
+# --- Setup Bot (原有) ---
 def setup_bot(app_instance: Application, bot_index: int) -> None:
     token_end = app_instance.bot.token[-4:]
     
@@ -401,12 +448,12 @@ async def startup_event():
     if GLOBAL_VIDEO_MAP:
         GLOBAL_VIDEO_PATTERN = r"^(" + "|".join([re.escape(k) for k in GLOBAL_VIDEO_MAP.keys()]) + r")$"
 
+    # --- 原有 Bots (1-9) 初始化 ---
     for i in range(1, 10):
         token = os.getenv(f"BOT_TOKEN_{i}")
         if token:
             application = Application.builder().token(token).build()
             application.bot_data["fastapi_app"] = app
-            # 🔥 这里把 Bot 的 ID 存进去，方便后面查
             application.bot_data["bot_index"] = i 
             await application.initialize()
             setup_bot(application, i)
@@ -431,6 +478,25 @@ async def startup_event():
                     "last_sent": None
                 }
             logger.info(f"Bot #{i} ({token[-4:]}) 加载完成")
+
+    # --- 🔥 [新增] 计算器 Bot 初始化 ---
+    calc_token = os.getenv("CALC_BOT_TOKEN")
+    if calc_token:
+        try:
+            calc_app = Application.builder().token(calc_token).build()
+            await calc_app.initialize()
+            
+            # 设置计算器专用的 Handler
+            setup_calculator_bot(calc_app)
+            
+            # 注册到 Webhook 路由中，路径设为 'calc_bot_webhook'
+            # Render 的 Webhook URL 后面要填这个：https://your-app.onrender.com/calc_bot_webhook
+            BOT_APPLICATIONS["calc_bot_webhook"] = calc_app
+            logger.info(f"🧮 计算器 Bot ({calc_token[-4:]}) 加载完成")
+        except Exception as e:
+            logger.error(f"❌ 计算器 Bot 启动失败: {e}")
+    else:
+        logger.info("⚠️ 未检测到 CALC_BOT_TOKEN，计算器 Bot 跳过启动。")
 
     try:
         PLAYWRIGHT_INSTANCE = await async_playwright().start()
