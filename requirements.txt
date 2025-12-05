@@ -4,3 +4,5 @@ python-telegram-bot
 playwright==1.56.0
 gunicorn
 httpx
+# 在原有基础上增加
+simpleeval
