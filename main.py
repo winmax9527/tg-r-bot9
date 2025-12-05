@@ -323,28 +323,48 @@ async def send_global_video(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 # --- 🔥 [新增] 计算器逻辑 ---
 def safe_calculate(expression: str):
-    """安全计算逻辑"""
+    """安全计算逻辑 - 支持文本混合模式"""
     try:
-        # 清理非法字符，只允许数字和数学符号
-        if not re.match(r'^[\d\+\-\*\/\(\)\.\s\%\^]+$', expression):
-            return None # 不是算式，不回复
-            
-        # 预处理符号
-        expression = expression.replace('×', '*').replace('÷', '/').replace('^', '**')
+        # --- 1. 预处理：清洗数据 (关键修改) ---
+        # 允许中文和文字混排，我们将它们视为"注释"并过滤掉
+        # 逻辑：将所有 [不是] 数字、小数点、运算符的字符，全部替换为空字符串
+        # 保留字符: 0-9, +, -, *, /, (, ), ., %, ^
+        cleaned_expr = re.sub(r'[^\d\+\-\*\/\(\)\.\%\^]', '', expression)
+
+        # --- 2. 检查清洗后的算式是否有效 ---
+        if not cleaned_expr:
+            return None # 如果清洗完是空的（比如发了纯文字"你好"），不回复
         
-        # 长度限制，防止DoS
-        if len(expression) > 100:
+        # 边缘情况防止：如果清洗完只剩一个小数点或运算符
+        if len(cleaned_expr) == 1 and cleaned_expr in '+-*/.^%':
+            return None
+
+        # --- 3. 符号标准化 ---
+        # (这部分和你原有的逻辑保持一致)
+        final_expr = cleaned_expr.replace('^', '**')
+        
+        # --- 4. 长度限制 ---
+        if len(final_expr) > 100:
             return "❌ 算式太长了。"
 
-        result = simple_eval(expression)
-        return f"🔢 结果: {result}"
-    except SyntaxError:
-        return "❌ 格式错误。"
-    except ZeroDivisionError:
-        return "❌ 不能除以零。"
-    except Exception:
-        return None # 其他错误忽略
+        # --- 5. 执行计算 ---
+        # 使用 simple_eval 或者 eval (注意安全)
+        # 这里假设你已经引入了 simple_eval
+        result = simple_eval(final_expr)
+        
+        # 格式化输出：如果是整数，去掉 .0
+        if isinstance(result, float) and result.is_integer():
+            result = int(result)
 
+        return f"🔢 结果: {result}"
+
+    except SyntaxError:
+        # 比如提取出了 "123++23"，会导致语法错误
+        return "❌ 格式错误 (请检查运算符)"
+    except ZeroDivisionError:
+        return "❌ 不能除以零"
+    except Exception:
+        return None
 # --- 🔥 [修改后] 计算器 Bot 设置 (支持连续计算) ---
 # --- 🔥 [修复版] 解决除法(/)被当做命令忽略的问题 ---
 def setup_calculator_bot(app_instance: Application) -> None:
@@ -371,7 +391,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
                 reply_text = update.message.reply_to_message.text
                 
                 # 1. 尝试提取 "🔢 结果: 123"
-                match = re.search(r"结果:\s*(-?\d+(\.\d+)?)", reply_text)
+                match = re.search(r"结果:\s*(-?\d+(\.\d+)?)", reply_text)xf
                 
                 previous_num = None
                 if match:
