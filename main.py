@@ -361,35 +361,56 @@ def safe_calculate(expression: str):
     except Exception:
         return None
 
-# --- 🔥 [新增功能] 获取 A 股新股数据逻辑 ---
+# --- 🔥 [新增功能] 获取 A 股新股数据逻辑 (修复反爬与日志) ---
 async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """从东财接口获取近期申购与上市新股"""
     # 东方财富公开 API
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    
+    # 🔥 修复 1: 完善 Headers，伪装成浏览器访问
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://data.eastmoney.com/",
+        "Origin": "https://data.eastmoney.com",
+        "Accept": "*/*"
+    }
+
+    # 🔥 修复 2: 增加 source 和 client 参数，columns 改为 ALL 以防字段名变动
     params = {
         "reportName": "RPT_NEWBOARD_IPOALL",
-        "columns": "SECURITY_CODE,SECURITY_NAME,APPLY_DATE,LISTING_DATE",
+        "columns": "ALL", 
+        "source": "WEB",
+        "client": "WEB",
         "sortColumns": "APPLY_DATE",
-        "sortTypes": "-1",  # 倒序
-        "pageSize": "50",   # 抓取最近 50 条足够覆盖
+        "sortTypes": "-1",
+        "pageSize": "50",
         "pageNumber": "1"
     }
 
     try:
+        # 发送提示
         await safe_reply(update, "🔍 正在查询A股新股日历，请稍候...")
         
         if GLOBAL_HTTP_CLIENT is None:
             raise RuntimeError("HTTP Client not ready")
 
-        resp = await GLOBAL_HTTP_CLIENT.get(url, params=params)
+        # 发起请求
+        resp = await GLOBAL_HTTP_CLIENT.get(url, params=params, headers=headers)
         data = resp.json()
         
+        # 🔥 修复 3: 打印 API 原始返回结果到日志 (方便排查)
+        # 只有在 result 为空时打印，避免日志太乱
+        if not data.get("result"):
+             logger.warning(f"⚠️ 东财API返回异常: {data}")
+
         if not data.get("result") or not data["result"].get("data"):
-            await safe_reply(update, "❌ 暂时无法获取新股数据。")
+            await safe_reply(update, "❌ 接口返回数据为空 (可能是反爬限制)，请检查后台日志。")
             return
 
         stock_list = data["result"]["data"]
         
+        # 获取 Docker 容器内的当前时间 (注意时区可能是 UTC)
+        # 为了保险，我们只比较日期字符串
         today = datetime.datetime.now().strftime("%Y-%m-%d")
         
         apply_stocks = []   # 即将/今日申购
@@ -398,12 +419,14 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
         for stock in stock_list:
             code = stock.get("SECURITY_CODE", "")
             name = stock.get("SECURITY_NAME", "")
+            
+            # 注意：字段名有时候是 SECURITY_CODE，有时候是 small case，这里用 columns=ALL 后通常是大写
             apply_date = stock.get("APPLY_DATE")
             listing_date = stock.get("LISTING_DATE")
             
-            # 处理时间字符串 (API返回通常是 "2023-10-27 00:00:00")
-            if apply_date: apply_date = apply_date.split(" ")[0]
-            if listing_date: listing_date = listing_date.split(" ")[0]
+            # 处理时间字符串 (API返回通常是 "2025-12-15 00:00:00")
+            if apply_date: apply_date = str(apply_date).split(" ")[0]
+            if listing_date: listing_date = str(listing_date).split(" ")[0]
 
             # 筛选：申购日期 >= 今天
             if apply_date and apply_date >= today:
@@ -413,27 +436,27 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if listing_date and listing_date >= today:
                 listing_stocks.append(f"• <code>{code}</code> <b>{name}</b> ({listing_date[5:]})")
 
-        # 排序：日期越近越靠前
-        apply_stocks.sort()
-        listing_stocks.sort()
-
+        # 排序：日期越近越靠前 (倒序反转回来，或者保持 API 的顺序)
+        # API 默认是日期倒序(最新的在前面)，我们为了阅读习惯，可以保持或调整
+        
         msg_parts = []
         if apply_stocks:
-            msg_parts.append("📅 <b>近期即将申购</b>\n" + "\n".join(apply_stocks))
+            # 列表翻转一下，把最近日期的放在上面
+            msg_parts.append("📅 <b>近期即将申购</b>\n" + "\n".join(sorted(apply_stocks)))
         if listing_stocks:
-            msg_parts.append("🔔 <b>近期即将上市</b>\n" + "\n".join(listing_stocks))
+            msg_parts.append("🔔 <b>近期即将上市</b>\n" + "\n".join(sorted(listing_stocks)))
             
         if not msg_parts:
-            final_msg = "📭 近期暂无待申购或待上市的新股。"
+            # 这种情况说明有数据，但都是过去的
+            final_msg = f"📭 近期 ({today} 起) 暂无待申购或待上市的新股。"
         else:
             final_msg = "\n\n".join(msg_parts)
             
         await safe_reply(update, final_msg, parse_mode='HTML')
 
     except Exception as e:
-        logger.error(f"获取新股数据失败: {e}")
-        await safe_reply(update, "❌ 数据获取失败，请稍后重试。")
-
+        logger.error(f"获取新股数据代码报错: {e}")
+        await safe_reply(update, "❌ 数据处理出错，请查看 Logs。")
 
 # --- 🔥 [修改后] 计算器 Bot 设置 (支持连续计算 + 新股查询) ---
 def setup_calculator_bot(app_instance: Application) -> None:
