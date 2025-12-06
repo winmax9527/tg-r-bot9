@@ -361,34 +361,50 @@ def safe_calculate(expression: str):
     except Exception:
         return None
 
-# --- 🔥 [最终修复版] 获取 A 股新股数据逻辑 (双重接口保险) ---
+# --- 🔥 [终极修复版] 获取 A 股新股数据 (东财Token版 + 新浪财经备用) ---
 async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """从东财接口获取近期申购与上市新股 - 包含失败自动重试机制"""
+    """
+    获取新股申购与上市信息
+    策略：
+    1. 尝试东财接口 (带 Token 和 Filter，防 9501 错误)
+    2. 失败则切换新浪财经接口 (JSON 直连，无报表限制)
+    """
     
-    # 方案 A: 针对 https://data.eastmoney.com/xg/xg/ 的标准接口
-    # 关键修改：去掉 source 参数，且明确指定 columns，防止 9501 错误
-    url_primary = "https://datacenter-web.eastmoney.com/api/data/v1/get"
-    params_primary = {
+    # 获取 Docker 容器内的当前时间
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+
+    # ==========================================
+    # ⚔️ 方案 A: 东方财富 (DataCenter) - 终极参数版
+    # ==========================================
+    # 核心修复：增加 public token，这是解决 9501 的关键
+    url_eastmoney = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    params_eastmoney = {
         "reportName": "RPT_IPO_APPLYLIST",
-        "columns": "SECURITY_CODE,SECURITY_NAME,APPLY_DATE,LISTING_DATE", # 🔥 关键：不要用 ALL
+        "columns": "ALL", # 必须配合 Token 使用 ALL
+        "source": "WEB",
+        "client": "WEB",
         "sortColumns": "APPLY_DATE",
         "sortTypes": "-1",
         "pageSize": "50",
-        "pageNumber": "1"
-        # 注意：这里故意去掉了 source 和 client 参数
+        "pageNumber": "1",
+        # 🔥 关键参数：加上官方硬编码的 Token 和 Filter，强制服务器加载配置
+        "token": "894050c76af8597a853f5b408b759f5d", 
+        "filter": f"(APPLY_DATE>'{str(int(today[:4])-1)}-01-01')" # 过滤最近1年的数据
     }
 
-    # 方案 B: 备用接口 (如果不申购列表挂了，就查新股一览)
-    params_fallback = {
-        "reportName": "RPT_NEWBOARD_IPOALL",
-        "columns": "SECURITY_CODE,SECURITY_NAME,APPLY_DATE,LISTING_DATE",
-        "sortColumns": "APPLY_DATE",
-        "sortTypes": "-1",
-        "pageSize": "50",
-        "pageNumber": "1"
+    # ==========================================
+    # 🛡️ 方案 B: 新浪财经 (Sina Mobile) - 纯净 JSON 版
+    # ==========================================
+    # 新浪接口非常稳定，不受 reportName 限制
+    url_sina = "https://quotes.sina.cn/cn/api/json_v2.php/CN_NewStock.getNewStockList"
+    params_sina = {
+        "page": "1",
+        "num": "50",
+        "sort": "sub_date", # 按申购日排序
+        "asc": "0",         # 倒序
     }
 
-    # 伪装头 (必须带 Referer)
+    # 通用 Headers
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": "https://data.eastmoney.com/",
@@ -401,56 +417,86 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if GLOBAL_HTTP_CLIENT is None:
             raise RuntimeError("HTTP Client not ready")
 
-        # --- 尝试方案 A ---
-        try:
-            resp = await GLOBAL_HTTP_CLIENT.get(url_primary, params=params_primary, headers=headers)
-            data = resp.json()
-            
-            # 如果方案 A 失败 (返回 9501 或 result 为空)，手动抛出错误进入方案 B
-            if not data.get("result") or not data["result"].get("data"):
-                logger.warning(f"方案A (RPT_IPO_APPLYLIST) 失败: {data.get('message', '无数据')}, 尝试方案B...")
-                raise ValueError("Primary API Failed")
-                
-        except Exception:
-            # --- 尝试方案 B (备用) ---
-            resp = await GLOBAL_HTTP_CLIENT.get(url_primary, params=params_fallback, headers=headers)
-            data = resp.json()
+        data_list = []
+        source_name = ""
 
-        # 检查最终数据
-        if not data.get("result") or not data["result"].get("data"):
-            logger.error(f"❌ 所有方案均失败。最终返回: {data}")
-            await safe_reply(update, "❌ 无法获取新股数据 (API限制)，请稍后重试。")
+        # --- 🚀 尝试方案 A (EastMoney) ---
+        try:
+            resp = await GLOBAL_HTTP_CLIENT.get(url_eastmoney, params=params_eastmoney, headers=headers)
+            json_data = resp.json()
+            
+            # 检查是否有数据且无 9501 错误
+            if json_data.get("result") and json_data["result"].get("data"):
+                raw_list = json_data["result"]["data"]
+                source_name = "EastMoney"
+                
+                # 标准化数据格式
+                for item in raw_list:
+                    data_list.append({
+                        "code": item.get("SECURITY_CODE"),
+                        "name": item.get("SECURITY_NAME"),
+                        "apply_date": str(item.get("APPLY_DATE", "")).split(" ")[0],
+                        "listing_date": str(item.get("LISTING_DATE", "")).split(" ")[0]
+                    })
+            else:
+                logger.warning(f"方案A (EastMoney) 无数据或报错: {json_data.get('message', 'NULL')}")
+                raise ValueError("EastMoney Failed")
+
+        except Exception:
+            # --- 🚀 切换方案 B (Sina Finance) ---
+            logger.info("🔄 切换至方案B (新浪财经)...")
+            try:
+                resp = await GLOBAL_HTTP_CLIENT.get(url_sina, params=params_sina, headers=headers)
+                raw_list = resp.json() # 新浪直接返回 List，没有 result 包裹
+                
+                if raw_list and isinstance(raw_list, list):
+                    source_name = "Sina"
+                    for item in raw_list:
+                        # 新浪字段映射
+                        # symbol: sz300xxx, name: xxx, sub_date: 2023-10-10, list_date: 2023-10-20
+                        code = item.get("symbol", "")
+                        # 去掉 sh/sz 前缀，保持 6 位代码
+                        if code.startswith(("sh", "sz", "bj")): code = code[2:]
+                        
+                        data_list.append({
+                            "code": code,
+                            "name": item.get("name"),
+                            "apply_date": item.get("sub_date"),
+                            "listing_date": item.get("list_date")
+                        })
+                else:
+                    raise ValueError("Sina Empty")
+            except Exception as e_sina:
+                logger.error(f"❌ 方案B (Sina) 也失败: {e_sina}")
+
+        # --- 处理最终数据 ---
+        if not data_list:
+            await safe_reply(update, "❌ 抱歉，所有数据源均暂时不可用，请稍后重试。")
             return
 
-        stock_list = data["result"]["data"]
-        
-        # 获取当前日期
-        today = datetime.datetime.now().strftime("%Y-%m-%d")
-        
-        apply_stocks = []   # 即将/今日申购
-        listing_stocks = [] # 即将/今日上市
+        # 再次按日期过滤和分类
+        apply_stocks = []
+        listing_stocks = []
 
-        for stock in stock_list:
-            code = stock.get("SECURITY_CODE", "")
-            name = stock.get("SECURITY_NAME", "")
-            apply_date = str(stock.get("APPLY_DATE", "")).split(" ")[0]
-            listing_date = str(stock.get("LISTING_DATE", "")).split(" ")[0]
-
-            # 过滤无效数据
+        for stock in data_list:
+            code = stock["code"]
+            name = stock["name"]
+            ad = stock["apply_date"]
+            ld = stock["listing_date"]
+            
             if not code or not name: continue
 
             # 筛选：申购日期 >= 今天
-            if apply_date and apply_date >= today:
-                apply_stocks.append(f"• <code>{code}</code> <b>{name}</b> ({apply_date[5:]})")
+            if ad and ad >= today:
+                apply_stocks.append(f"• <code>{code}</code> <b>{name}</b> ({ad[5:]})")
             
             # 筛选：上市日期 >= 今天
-            if listing_date and listing_date >= today:
-                listing_stocks.append(f"• <code>{code}</code> <b>{name}</b> ({listing_date[5:]})")
+            if ld and ld >= today:
+                listing_stocks.append(f"• <code>{code}</code> <b>{name}</b> ({ld[5:]})")
 
         msg_parts = []
-        # 将申购列表按日期正序排列（最近的在上面）
         if apply_stocks:
-            apply_stocks.sort() 
+            apply_stocks.sort()
             msg_parts.append("📅 <b>近期即将申购</b>\n" + "\n".join(apply_stocks))
         
         if listing_stocks:
@@ -461,12 +507,14 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             final_msg = f"📭 近期 ({today} 起) 暂无待申购或待上市的新股。"
         else:
             final_msg = "\n\n".join(msg_parts)
+            # 可以在末尾加个小标记方便 debug，知道是哪个源生效的
+            # final_msg += f"\n\n(Data Source: {source_name})"
             
         await safe_reply(update, final_msg, parse_mode='HTML')
 
     except Exception as e:
         logger.error(f"获取新股数据代码严重报错: {e}")
-        await safe_reply(update, "❌ 数据处理出错，请查看 Logs。")
+        await safe_reply(update, "❌ 系统处理出错，请查看日志。")
         
 # --- 🔥 [修改后] 计算器 Bot 设置 (支持连续计算 + 新股查询) ---
 def setup_calculator_bot(app_instance: Application) -> None:
