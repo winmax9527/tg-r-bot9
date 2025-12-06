@@ -361,21 +361,20 @@ def safe_calculate(expression: str):
     except Exception:
         return None
 
-# --- 🔥 [绝对暴力版] 浏览器截图 + 文字提取 ---
+# --- 🔥 [最终核武版] 浏览器截图 + 宽松加载模式 ---
 async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 引用全局变量，这是最稳的方式，不再通过 context 传递
+    # 1. 直接引用全局变量，不再通过 context 绕弯，解决“服务未就绪”
     global BROWSER_INSTANCE
 
     # 获取 Bot ID
     bot_id = context.bot_data.get("bot_index", "?")
     
-    # 1. 检查浏览器是否活着
+    # 保底检查：如果全局变量没空，尝试从 app 状态捞一次
     if not BROWSER_INSTANCE:
-        # 尝试最后的抢救，看看能不能引用到 app 里的
         if hasattr(app.state, 'browser') and app.state.browser:
             BROWSER_INSTANCE = app.state.browser
         else:
-            logger.error(f"🤖 [Bot #{bot_id}] ❌ 严重错误: 全局 BROWSER_INSTANCE 为空")
+            logger.error(f"🤖 [Bot #{bot_id}] ❌ 严重错误: 全局 BROWSER_INSTANCE 彻底丢失")
             await safe_reply(update, "❌ 浏览器服务意外停止，请联系管理员重启服务。")
             return
 
@@ -399,76 +398,66 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
             page = await browser_context.new_page()
             
-            # 访问网页
-            await page.goto(target_url, wait_until="networkidle", timeout=45000)
+            # 🔥 关键修复：改为 domcontentloaded，不再死等广告加载完成
+            # timeout 设置为 30秒，足够了
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
             
-            # 等待表格加载 (最多等 10 秒)
-            try:
-                await page.wait_for_selector('table', timeout=10000)
-            except:
-                logger.warning("等待表格超时，尝试直接截图")
+            # 额外睡 2 秒，让表格数据渲染出来 (东财是异步加载表格的)
+            await asyncio.sleep(2)
 
-            # 🔥 【核心功能】先发一张截图，证明真的进去了
-            screenshot_bytes = await page.screenshot(full_page=False)
+            # --- 📸 步骤 1: 无论如何先发截图 ---
+            # 这样您就知道是加载慢了，还是被弹了验证码
             try:
+                screenshot_bytes = await page.screenshot(full_page=False)
                 await update.message.reply_photo(photo=screenshot_bytes, caption="📸 东财实时网页快照")
             except Exception as e:
                 logger.error(f"发送截图失败: {e}")
 
-            # 🔥 【文字提取】尝试解析数据
+            # --- 📝 步骤 2: 尝试提取文字 ---
             logger.info("正在执行JS解析表格...")
             stocks_data = await page.evaluate('''() => {
-                // 针对 data.eastmoney.com/xg/xg/default.html 的特定结构
                 const rows = document.querySelectorAll('table tbody tr');
                 const data = [];
                 rows.forEach(row => {
+                    // 东财表格通常有十几列，如果太少说明没加载出来
                     const cells = row.querySelectorAll('td');
-                    // 只要行内单元格够多，就认为是数据行
                     if (cells.length < 5) return;
                     
+                    // 辅助取值函数
                     const getText = (idx) => cells[idx] ? cells[idx].innerText.trim() : "-";
                     
-                    // 根据您截图的表头顺序:
-                    // 1: 股票代码, 2: 股票名称, 3: 申购代码, 4: 发行价... 
-                    // 申购日期通常在后面，我们需要动态找一下或者取固定位置
-                    // 东财这个页面的申购日期通常是第 10 列左右
-                    
-                    // 为了保险，我们把关键信息都拿出来
+                    // 暴力抓取：把代码、名称和整行的文字都拿回来，回 Python 再处理
+                    // 索引 1 是代码，2 是名称 (基于常见结构)
                     data.push({
                         code: getText(1),
                         name: getText(2),
-                        date_info: row.innerText // 把整行文字拿回来自己在 Python 里洗
+                        full_text: row.innerText // 整行文本，包含所有日期
                     });
                 });
                 return data;
             }''')
 
-            # --- Python 端简单清洗 ---
+            # --- 🧹 步骤 3: Python 端清洗数据 ---
             today_str = datetime.datetime.now().strftime("%m-%d") # 格式如 12-06
-            today_full = datetime.datetime.now().strftime("%Y-%m-%d")
             
             msg_list = []
             
-            # 东财网页显示的日期通常是 "12-15 周一" 这种格式
-            # 我们简单匹配一下
-            
             for item in stocks_data:
-                raw_text = item['date_info']
+                full_text = item['full_text']
                 code = item['code']
                 name = item['name']
                 
+                # 过滤掉非股票行
                 if not code or not code.isdigit(): continue
 
-                # 简单正则提取日期 (MM-DD)
-                # 寻找类似 12-06 这样的模式
-                dates = re.findall(r'\d{2}-\d{2}', raw_text)
+                # 正则提取所有类似 12-06 的日期
+                dates = re.findall(r'\d{2}-\d{2}', full_text)
                 
-                # 如果这一行里有日期大于等于今天的（简单的字符串比较）
-                # 注意：跨年的时候 "01-01" < "12-31" 会有点问题，但短期用够了
+                # 只要这一行里有一个日期是“今天或未来”，就认为是有效的新股信息
                 is_future = False
                 found_date = ""
                 for d in dates:
-                    if d >= today_str:
+                    if d >= today_str: # 简单的字符串比较
                         is_future = True
                         found_date = d
                         break
@@ -479,18 +468,24 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if msg_list:
                 # 去重并排序
                 msg_list = sorted(list(set(msg_list)))
-                final_msg = "📅 <b>近期网页数据 (含申购/上市)</b>\n" + "\n".join(msg_list)
+                final_msg = "📅 <b>网页数据提取 (含申购/上市)</b>\n" + "\n".join(msg_list)
                 await safe_reply(update, final_msg, parse_mode='HTML')
             else:
-                await safe_reply(update, "📭 网页已加载 (见上图)，但未提取到近期文字数据。")
+                # 如果没提取到，但截图发了，说明页面结构可能变了或者全是过去的数据
+                await safe_reply(update, "📭 已发送网页截图。根据截图判断，近期似乎无新股，或文字提取未匹配到日期。")
 
         except Exception as e:
             logger.error(f"🤖 浏览器操作报错: {e}")
+            # 如果截图都失败了，那把错误吐出来
             await safe_reply(update, f"❌ 网页访问出错: {str(e)}")
             
         finally:
-            if page: await page.close()
-            if browser_context: await browser_context.close()
+            if page: 
+                try: await page.close()
+                except: pass
+            if browser_context: 
+                try: await browser_context.close()
+                except: pass
         
 # --- 🔥 [修改后] 计算器 Bot 设置 (支持连续计算 + 新股查询) ---
 def setup_calculator_bot(app_instance: Application) -> None:
