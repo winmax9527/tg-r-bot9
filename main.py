@@ -361,13 +361,13 @@ def safe_calculate(expression: str):
     except Exception:
         return None
 
-# --- 🔥 [清爽路线] 新浪财经旧版数据 (无广告/无反爬) ---
+# --- 🔥 [最终完善版] 新浪财经精准数据 (含待定日期) ---
 async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BROWSER_INSTANCE
 
     bot_id = context.bot_data.get("bot_index", "?")
     
-    # 检查浏览器
+    # 1. 检查浏览器
     if not BROWSER_INSTANCE:
         if hasattr(app.state, 'browser') and app.state.browser:
             BROWSER_INSTANCE = app.state.browser
@@ -376,9 +376,9 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await safe_reply(update, "❌ 浏览器服务未就绪。")
             return
 
-    await safe_reply(update, "🔍 正在访问新浪财经数据中心 (清爽版)...")
+    await safe_reply(update, "🔍 正在访问新浪财经数据中心...")
     
-    # 新浪财经-新股发行-旧版页面 (纯表格，无乱七八糟的JS和广告)
+    # 新浪财经-新股发行-旧版页面 (数据最全，结构最稳)
     target_url = "https://vip.stock.finance.sina.com.cn/corp/go.php/vRPD_NewStockIssue/page/1.phtml"
     
     page = None
@@ -388,29 +388,24 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
         try:
             logger.info(f"🤖 [Bot #{bot_id}] 🚀 访问新浪页面: {target_url}")
             
-            # 创建上下文
             browser_context = await BROWSER_INSTANCE.new_context(
-                # 使用桌面 UA 即可，因为这个旧版页面本身就很简单
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 viewport={'width': 1280, 'height': 800}
             )
             page = await browser_context.new_page()
             
-            # 访问页面 (domcontentloaded 即可)
+            # 访问页面
             await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
-            
-            # 新浪这个页面是静态的，几乎不用等，但为了保险睡 1 秒
-            await asyncio.sleep(1)
+            await asyncio.sleep(1) # 稍等渲染
 
-            # 📸 步骤 1: 截图 (您会看到一张非常复古的表格)
+            # 📸 步骤 1: 截图 (留底)
             try:
                 screenshot_bytes = await page.screenshot(full_page=False)
                 await update.message.reply_photo(photo=screenshot_bytes, caption="📸 新浪财经实时数据")
             except Exception as e:
                 logger.error(f"截图失败: {e}")
 
-            # 📝 步骤 2: 提取文字
-            # 新浪的表格 ID 通常是 NewStockIssueTable
+            # 📝 步骤 2: 精准提取 (根据您的截图调整了列索引)
             stocks_data = await page.evaluate('''() => {
                 const table = document.getElementById('NewStockIssueTable');
                 if (!table) return [];
@@ -418,73 +413,90 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 const rows = table.querySelectorAll('tbody tr');
                 const data = [];
                 
-                // 跳过表头，从第2行开始
+                // 从第2行开始(跳过表头)
                 for (let i = 1; i < rows.length; i++) {
                     const row = rows[i];
                     const cells = row.querySelectorAll('td');
+                    // 确保这一行数据是完整的
                     if (cells.length < 5) continue;
                     
-                    const getText = (idx) => cells[idx] ? cells[idx].innerText.trim() : "";
+                    const getText = (idx) => cells[idx] ? cells[idx].innerText.trim() : "-";
                     
-                    // 新浪旧版表格结构 (非常稳定):
-                    // col 0: 证券代码 (000xxx)
-                    // col 1: 证券简称 (xxx)
-                    // col 2: 申购代码
-                    // ...
-                    // col 7: 上市日期
-                    // col 8: 申购日期 (注意：新浪有时候把申购日放在后面，具体看页面)
+                    // 🔥 根据新浪截图重新校准列：
+                    // cells[0]: 证券代码 (e.g. 688805)
+                    // cells[1]: 申购代码 (跳过)
+                    // cells[2]: 证券简称 (e.g. 健信超导)
+                    // cells[3]: 上网发行日期 (申购日, e.g. 2025-12-15)
+                    // cells[4]: 上市日期 (e.g. - 或 2025-12-02)
                     
-                    // 我们直接暴力把整行拿回来处理，反正数据量不大
                     data.push({
                         code: getText(0),
-                        name: getText(1),
-                        t1: getText(7), // 可能是上市日
-                        t2: getText(8), // 可能是申购日
-                        full_text: row.innerText 
+                        name: getText(2),
+                        sub_date: getText(3), 
+                        list_date: getText(4)
                     });
                 }
                 return data;
             }''')
 
-            # --- Python 端数据清洗 ---
+            # --- Python 端严谨处理 ---
             today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-            # 简短版日期用于显示 (12-06)
-            today_short = datetime.datetime.now().strftime("%m-%d")
-
-            msg_list = []
+            
+            apply_list = []  # 申购列表
+            listing_list = [] # 上市列表
             
             for item in stocks_data:
-                full_text = item['full_text']
                 code = item['code']
                 name = item['name']
+                s_date = item['sub_date'] # 申购日 2025-12-15
+                l_date = item['list_date'] # 上市日 2025-12-02 或 -
                 
                 if not code or not code.isdigit(): continue
 
-                # 新浪的日期格式通常是 "2023-12-06"
-                # 我们提取所有 YYYY-MM-DD
-                dates = re.findall(r'\d{4}-\d{2}-\d{2}', full_text)
-                
-                is_future = False
-                found_date = ""
-                
-                for d in dates:
-                    # 比较日期字符串 "2023-12-06" >= "2023-12-06"
-                    if d >= today_str:
-                        is_future = True
-                        # 转成短日期显示 12-06
-                        found_date = d[5:] 
-                        break
-                
-                if is_future:
-                   msg_list.append(f"• <code>{code}</code> <b>{name}</b> ({found_date})")
+                # 1. 处理申购 (只看今天及未来的)
+                if s_date and s_date != "-" and s_date >= today_str:
+                    # 显示格式: 12-15
+                    display_date = s_date[5:] if len(s_date) >= 10 else s_date
+                    apply_list.append(f"• <code>{code}</code> <b>{name}</b> ({display_date})")
 
-            if msg_list:
-                # 去重并排序
-                msg_list = sorted(list(set(msg_list)))
-                final_msg = "📅 <b>A股新股日历 (新浪源)</b>\n" + "\n".join(msg_list)
-                await safe_reply(update, final_msg, parse_mode='HTML')
+                # 2. 处理上市 (严谨逻辑)
+                # 情况A: 已经确定了上市日期，且是今天或未来
+                if l_date and l_date != "-" and l_date >= today_str:
+                    display_date = l_date[5:] if len(l_date) >= 10 else l_date
+                    listing_list.append(f"• <code>{code}</code> <b>{name}</b> ({display_date})")
+                
+                # 情况B: 日期未定(-)，但申购日期是最近的(比如最近一个月内)，说明是“待上市”
+                # 为了防止把几年前的旧数据捞出来，我们加一个限制：申购日期必须在过去60天以内或未来
+                elif l_date == "-":
+                    # 简单判断：如果申购日存在，且申购日 >= 两个月前
+                    # 这里简化处理：只要 s_date >= (今天 - 30天)，就认为是“待上市”
+                    try:
+                        last_month = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime("%Y-%m-%d")
+                        if s_date >= last_month:
+                             listing_list.append(f"• <code>{code}</code> <b>{name}</b> (待定)")
+                    except:
+                        pass
+
+            # --- 3. 排序与去重 ---
+            # 申购按日期排序
+            apply_list = sorted(list(set(apply_list)))
+            # 上市列表：把有日期的排前面，"待定"的排后面
+            listing_list_dated = sorted([x for x in listing_list if "待定" not in x])
+            listing_list_tbd = sorted([x for x in listing_list if "待定" in x])
+            final_listing = listing_list_dated + listing_list_tbd
+
+            msg_parts = []
+            if apply_list:
+                msg_parts.append("📅 <b>近期即将申购</b>\n" + "\n".join(apply_list))
+            
+            if final_listing:
+                msg_parts.append("🔔 <b>近期即将上市 / 待上市</b>\n" + "\n".join(final_listing))
+                
+            if not msg_parts:
+                await safe_reply(update, "📭 数据获取成功(见图)，但近期暂无申购或上市计划。")
             else:
-                await safe_reply(update, "📭 数据获取成功(见图)，但近期暂无新股申购/上市。")
+                final_msg = "\n\n".join(msg_parts)
+                await safe_reply(update, final_msg, parse_mode='HTML')
 
         except Exception as e:
             logger.error(f"浏览器操作报错: {e}")
