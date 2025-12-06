@@ -361,85 +361,99 @@ def safe_calculate(expression: str):
     except Exception:
         return None
 
-# --- 🔥 [最终核武版] 浏览器截图 + 宽松加载模式 ---
+# --- 🔥 [最终方案] 浏览器去广告截图版 (无需注册/无需Token) ---
 async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 1. 直接引用全局变量，不再通过 context 绕弯，解决“服务未就绪”
+    # 引用全局浏览器实例
     global BROWSER_INSTANCE
 
-    # 获取 Bot ID
     bot_id = context.bot_data.get("bot_index", "?")
     
-    # 保底检查：如果全局变量没空，尝试从 app 状态捞一次
+    # 1. 检查浏览器是否就绪
     if not BROWSER_INSTANCE:
         if hasattr(app.state, 'browser') and app.state.browser:
             BROWSER_INSTANCE = app.state.browser
         else:
-            logger.error(f"🤖 [Bot #{bot_id}] ❌ 严重错误: 全局 BROWSER_INSTANCE 彻底丢失")
-            await safe_reply(update, "❌ 浏览器服务意外停止，请联系管理员重启服务。")
+            logger.error(f"🤖 [Bot #{bot_id}] ❌ 浏览器未启动")
+            await safe_reply(update, "❌ 浏览器服务未就绪，请联系管理员。")
             return
 
-    await safe_reply(update, "🔍 正在前往东财网页截图，请稍候...")
+    await safe_reply(update, "🔍 正在启动浏览器访问 (自动去广告模式)...")
     
     target_url = "https://data.eastmoney.com/xg/xg/default.html"
     page = None
     browser_context = None
 
-    # 加锁防止内存爆炸
+    # 加锁
     async with BROWSER_LOCK:
         try:
-            logger.info(f"🤖 [Bot #{bot_id}] 🚀 开始浏览器任务: {target_url}")
+            logger.info(f"🤖 [Bot #{bot_id}] 🚀 访问东财页面: {target_url}")
             
-            # 创建上下文 (设置大窗口，保证截图清晰)
+            # 创建新页面 (1920x1200)
             browser_context = await BROWSER_INSTANCE.new_context(
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 viewport={'width': 1920, 'height': 1200},
-                device_scale_factor=2 # 高清截图
+                device_scale_factor=1.5
             )
-            
             page = await browser_context.new_page()
             
-            # 🔥 关键修复：改为 domcontentloaded，不再死等广告加载完成
-            # timeout 设置为 30秒，足够了
+            # 访问页面 (domcontentloaded 即可，不等广告图片加载完)
             await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
             
-            # 额外睡 2 秒，让表格数据渲染出来 (东财是异步加载表格的)
+            # ⏳ 稍微等一下，让弹窗弹出来，这样我们才能关掉它
             await asyncio.sleep(2)
 
-            # --- 📸 步骤 1: 无论如何先发截图 ---
-            # 这样您就知道是加载慢了，还是被弹了验证码
+            # 🔥🔥🔥 [核心] 暴力去广告/关弹窗脚本 🔥🔥🔥
+            logger.info("🔪 执行去广告脚本...")
+            await page.evaluate('''() => {
+                // 1. 尝试点击常见的关闭按钮 (class 包含 close)
+                const closers = document.querySelectorAll('.u-mask-close, .frame-close, [class*="close"]');
+                closers.forEach(el => {
+                    console.log("点击关闭按钮:", el);
+                    el.click();
+                });
+
+                // 2. 暴力删除所有遮罩层 (mask) 和 弹窗 (popup)
+                // 东财的广告通常在 .u-mask 或 .activity-modal 里
+                const trashes = document.querySelectorAll('.u-mask, .activity-modal, [class*="popup"], [class*="modal"]');
+                trashes.forEach(el => el.remove());
+                
+                // 3. 强制把表格区域显示出来 (防止被隐藏)
+                const table = document.querySelector('table');
+                if(table) table.style.visibility = 'visible';
+            }''')
+            
+            # 再睡 1 秒等页面刷新
+            await asyncio.sleep(1)
+
+            # 📸 步骤 1: 截图 (这时候应该是干净的表格了)
             try:
                 screenshot_bytes = await page.screenshot(full_page=False)
-                await update.message.reply_photo(photo=screenshot_bytes, caption="📸 东财实时网页快照")
+                await update.message.reply_photo(photo=screenshot_bytes, caption="📸 实时申购日历 (已去广告)")
             except Exception as e:
-                logger.error(f"发送截图失败: {e}")
+                logger.error(f"截图失败: {e}")
 
-            # --- 📝 步骤 2: 尝试提取文字 ---
-            logger.info("正在执行JS解析表格...")
+            # 📝 步骤 2: 提取文字 (双重保险)
             stocks_data = await page.evaluate('''() => {
                 const rows = document.querySelectorAll('table tbody tr');
                 const data = [];
                 rows.forEach(row => {
-                    // 东财表格通常有十几列，如果太少说明没加载出来
                     const cells = row.querySelectorAll('td');
                     if (cells.length < 5) return;
                     
-                    // 辅助取值函数
-                    const getText = (idx) => cells[idx] ? cells[idx].innerText.trim() : "-";
+                    const getText = (idx) => cells[idx] ? cells[idx].innerText.trim() : "";
                     
-                    // 暴力抓取：把代码、名称和整行的文字都拿回来，回 Python 再处理
-                    // 索引 1 是代码，2 是名称 (基于常见结构)
+                    // 东财表格结构：Code(1), Name(2), DateInfo(整行)
                     data.push({
                         code: getText(1),
                         name: getText(2),
-                        full_text: row.innerText // 整行文本，包含所有日期
+                        full_text: row.innerText
                     });
                 });
                 return data;
             }''')
 
-            # --- 🧹 步骤 3: Python 端清洗数据 ---
-            today_str = datetime.datetime.now().strftime("%m-%d") # 格式如 12-06
-            
+            # --- Python 端数据清洗 ---
+            today_str = datetime.datetime.now().strftime("%m-%d")
             msg_list = []
             
             for item in stocks_data:
@@ -447,17 +461,16 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 code = item['code']
                 name = item['name']
                 
-                # 过滤掉非股票行
                 if not code or not code.isdigit(): continue
 
-                # 正则提取所有类似 12-06 的日期
+                # 提取日期 (格式如 12-06)
                 dates = re.findall(r'\d{2}-\d{2}', full_text)
                 
-                # 只要这一行里有一个日期是“今天或未来”，就认为是有效的新股信息
+                # 筛选今天及以后的
                 is_future = False
                 found_date = ""
                 for d in dates:
-                    if d >= today_str: # 简单的字符串比较
+                    if d >= today_str:
                         is_future = True
                         found_date = d
                         break
@@ -466,19 +479,15 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
                    msg_list.append(f"• <code>{code}</code> <b>{name}</b> ({found_date})")
 
             if msg_list:
-                # 去重并排序
                 msg_list = sorted(list(set(msg_list)))
-                final_msg = "📅 <b>网页数据提取 (含申购/上市)</b>\n" + "\n".join(msg_list)
+                final_msg = "📅 <b>近期新股数据</b>\n" + "\n".join(msg_list)
                 await safe_reply(update, final_msg, parse_mode='HTML')
             else:
-                # 如果没提取到，但截图发了，说明页面结构可能变了或者全是过去的数据
-                await safe_reply(update, "📭 已发送网页截图。根据截图判断，近期似乎无新股，或文字提取未匹配到日期。")
+                await safe_reply(update, "📭 截图如上。文字提取暂无数据 (可能是近期确实无新股)。")
 
         except Exception as e:
-            logger.error(f"🤖 浏览器操作报错: {e}")
-            # 如果截图都失败了，那把错误吐出来
-            await safe_reply(update, f"❌ 网页访问出错: {str(e)}")
-            
+            logger.error(f"浏览器操作报错: {e}")
+            await safe_reply(update, f"❌ 访问出错: {e}")
         finally:
             if page: 
                 try: await page.close()
