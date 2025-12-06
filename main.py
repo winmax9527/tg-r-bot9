@@ -361,10 +361,9 @@ def safe_calculate(expression: str):
     except Exception:
         return None
 
-# --- 🔥 [最终完善版 V3.0] 新浪财经精准数据 (含待定日期) ---
+# --- 🔥 [V4.0 修正版] 强制显示待定上市股票 ---
 async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BROWSER_INSTANCE
-
     bot_id = context.bot_data.get("bot_index", "?")
     
     # 1. 检查浏览器
@@ -378,36 +377,30 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await safe_reply(update, "🔍 正在访问新浪财经数据中心...")
     
-    # 新浪财经-新股发行-旧版页面 (数据最全，结构最稳)
     target_url = "https://vip.stock.finance.sina.com.cn/corp/go.php/vRPD_NewStockIssue/page/1.phtml"
-    
     page = None
     browser_context = None
 
     async with BROWSER_LOCK:
         try:
             logger.info(f"🤖 [Bot #{bot_id}] 🚀 访问新浪页面: {target_url}")
-            
             browser_context = await BROWSER_INSTANCE.new_context(
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 viewport={'width': 1280, 'height': 800}
             )
             page = await browser_context.new_page()
-            
-            # 访问页面
             await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(1) # 稍等渲染
+            await asyncio.sleep(1)
 
-            # 📸 步骤 1: 截图 (留底，方便您核对)
+            # 📸 步骤 1: 截图
             try:
                 screenshot_bytes = await page.screenshot(full_page=False)
                 await update.message.reply_photo(photo=screenshot_bytes, caption="📸 新浪财经实时数据")
             except Exception as e:
                 logger.error(f"截图失败: {e}")
 
-            # 📝 步骤 2: 精准提取 (根据您的截图调整了列索引)
+            # 📝 步骤 2: 提取数据
             stocks_data = await page.evaluate('''() => {
-                // 尝试获取特定的表格，如果找不到就找页面第一个大表格
                 let table = document.getElementById('NewStockIssueTable');
                 if (!table) table = document.querySelector('table'); 
                 if (!table) return [];
@@ -415,22 +408,15 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 const rows = table.querySelectorAll('tbody tr');
                 const data = [];
                 
-                // 从第2行开始(跳过表头)
+                // 从第2行开始
                 for (let i = 1; i < rows.length; i++) {
                     const row = rows[i];
                     const cells = row.querySelectorAll('td');
-                    // 确保这一行数据是完整的
                     if (cells.length < 5) continue;
                     
                     const getText = (idx) => cells[idx] ? cells[idx].innerText.trim() : "-";
                     
-                    // 🔥 根据新浪截图重新校准列：
-                    // cells[0]: 证券代码 (e.g. 688805)
-                    // cells[1]: 申购代码 (跳过)
-                    // cells[2]: 证券简称 (e.g. 健信超导)
-                    // cells[3]: 上网发行日期 (申购日, e.g. 2025-12-15)
-                    // cells[4]: 上市日期 (e.g. - 或 2025-12-02)
-                    
+                    // index 0: 代码, 2: 简称, 3: 申购日, 4: 上市日
                     data.push({
                         code: getText(0),
                         name: getText(2),
@@ -441,7 +427,7 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 return data;
             }''')
 
-            # --- Python 端严谨处理 ---
+            # --- Python 端处理 (逻辑修正) ---
             today_str = datetime.datetime.now().strftime("%Y-%m-%d")
             
             apply_list = []  # 申购列表
@@ -450,52 +436,56 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             for item in stocks_data:
                 code = item['code']
                 name = item['name']
-                s_date = item['sub_date'] # 申购日 2025-12-15
-                l_date = item['list_date'] # 上市日 2025-12-02 或 -
+                s_date = item['sub_date'] # 申购日
+                l_date = item['list_date'] # 上市日
                 
                 if not code or not code.isdigit(): continue
 
-                # 1. 处理申购 (只看今天及未来的)
-                if s_date and s_date != "-" and s_date >= today_str:
-                    # 显示格式: 12-15
-                    display_date = s_date[5:] if len(s_date) >= 10 else s_date
-                    apply_list.append(f"• <code>{code}</code> <b>{name}</b> ({display_date})")
-
-                # 2. 处理上市 (严谨逻辑)
-                # 情况A: 已经确定了上市日期，且是今天或未来
-                if l_date and l_date != "-" and l_date >= today_str:
-                    display_date = l_date[5:] if len(l_date) >= 10 else l_date
-                    listing_list.append(f"• <code>{code}</code> <b>{name}</b> ({display_date})")
+                # 1. 处理申购 (今天及未来)
+                # 格式化日期显示: 2025-12-15 -> 12-15
+                s_date_display = s_date[5:] if len(s_date) >= 10 else s_date
                 
-                # 情况B: 日期未定(-)，但申购日期是最近的(比如最近一个月内)或者是未来的，说明是“待上市”
+                if s_date and s_date != "-" and s_date >= today_str:
+                    apply_list.append(f"• <code>{code}</code> <b>{name}</b> ({s_date_display})")
+
+                # 2. 处理上市 (核心修改)
+                
+                # 情况A: 有明确上市日期 (今天及未来)
+                if l_date and l_date != "-" and len(l_date) >= 10:
+                    if l_date >= today_str:
+                        l_date_display = l_date[5:]
+                        listing_list.append(f"• <code>{code}</code> <b>{name}</b> ({l_date_display})")
+                
+                # 情况B: 上市日期为 "-" (待定)
+                # 只要这只股票有申购日期(说明已经排上队了)，且不是很久以前的历史数据，就算“待定”
                 elif l_date == "-":
-                    try:
-                        # 获取30天前的日期
-                        last_month = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime("%Y-%m-%d")
-                        # 逻辑：只要申购日期 >= 30天前，就算作“正在排队上市”
-                        if s_date and s_date >= last_month:
-                             listing_list.append(f"• <code>{code}</code> <b>{name}</b> (待定)")
-                    except:
-                        pass
+                    # 只要申购日期存在，我们默认它是待上市的新股
+                    # 为了不把几年前的旧数据拉出来，我们简单判断一下年份
+                    # 比如申购日期包含当前年份 (2025)
+                    current_year = datetime.datetime.now().strftime("%Y")
+                    if s_date and (current_year in s_date):
+                         listing_list.append(f"• <code>{code}</code> <b>{name}</b> (待定)")
 
             # --- 3. 排序与去重 ---
-            # 申购按日期排序
             apply_list = sorted(list(set(apply_list)))
             
-            # 上市列表：分开排序，有日期的在前，待定的在后
-            listing_list_dated = sorted([x for x in listing_list if "待定" not in x])
-            listing_list_tbd = sorted([x for x in listing_list if "待定" in x])
-            final_listing = listing_list_dated + listing_list_tbd
+            # 上市列表排序：有日期的排前面，待定的排后面
+            listing_list = sorted(list(set(listing_list)))
+            # 把"(待定)"放到最后
+            list_dated = [x for x in listing_list if "待定" not in x]
+            list_tbd = [x for x in listing_list if "待定" in x]
+            final_listing = list_dated + list_tbd
 
             msg_parts = []
             if apply_list:
                 msg_parts.append("📅 <b>近期即将申购</b>\n" + "\n".join(apply_list))
             
+            # 只有当列表有内容时才显示标题
             if final_listing:
                 msg_parts.append("🔔 <b>近期即将上市 / 待上市</b>\n" + "\n".join(final_listing))
                 
             if not msg_parts:
-                await safe_reply(update, "📭 数据获取成功(见图)，但近期暂无申购或上市计划。")
+                await safe_reply(update, "📭 数据获取成功，但近期暂无申购或上市计划。")
             else:
                 final_msg = "\n\n".join(msg_parts)
                 await safe_reply(update, final_msg, parse_mode='HTML')
