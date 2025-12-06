@@ -361,12 +361,11 @@ def safe_calculate(expression: str):
     except Exception:
         return None
 
-# --- 🔥 [V6.0 最终重构] 指令分离版 (申购/上市各论各的) ---
+# --- 🔥 [V7.0 拒绝凑合版] 智能识别待上市 (容错率 MAX) ---
 async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BROWSER_INSTANCE
     bot_id = context.bot_data.get("bot_index", "?")
     
-    # 1. 检查浏览器
     if not BROWSER_INSTANCE:
         if hasattr(app.state, 'browser') and app.state.browser:
             BROWSER_INSTANCE = app.state.browser
@@ -375,14 +374,14 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await safe_reply(update, "❌ 浏览器服务未就绪。")
             return
 
-    # 2. 判断用户意图 (是问申购还是问上市？)
+    # 1. 识别指令
     user_text = update.message.text.strip()
     is_asking_listing = "上市" in user_text
     
     if is_asking_listing:
-        await safe_reply(update, "🔍 正在筛选【即将上市】名单 (含待定)...")
+        await safe_reply(update, "🔍 正在检索【即将上市】及【排队中】新股...")
     else:
-        await safe_reply(update, "🔍 正在筛选【即将申购】名单...")
+        await safe_reply(update, "🔍 正在检索【即将申购】新股...")
     
     target_url = "https://vip.stock.finance.sina.com.cn/corp/go.php/vRPD_NewStockIssue/page/1.phtml"
     page = None
@@ -390,7 +389,7 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     async with BROWSER_LOCK:
         try:
-            logger.info(f"🤖 [Bot #{bot_id}] 🚀 访问新浪页面: {target_url}")
+            logger.info(f"🤖 [Bot #{bot_id}] 🚀 访问: {target_url}")
             browser_context = await BROWSER_INSTANCE.new_context(
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 viewport={'width': 1280, 'height': 800}
@@ -399,10 +398,10 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(1)
 
-            # 📸 截图 (保留功能，方便核对)
+            # 📸 截图
             try:
                 screenshot_bytes = await page.screenshot(full_page=False)
-                await update.message.reply_photo(photo=screenshot_bytes, caption="📸 数据源: 新浪财经")
+                await update.message.reply_photo(photo=screenshot_bytes, caption="📸 数据源验证 (新浪财经)")
             except Exception:
                 pass
 
@@ -420,9 +419,8 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     const cells = row.querySelectorAll('td');
                     if (cells.length < 5) continue;
                     
-                    const getText = (idx) => cells[idx] ? cells[idx].innerText.trim() : "-";
+                    const getText = (idx) => cells[idx] ? cells[idx].innerText.trim() : "";
                     
-                    // 新浪列索引: 0:代码, 2:简称, 3:申购日, 4:上市日
                     data.push({
                         code: getText(0),
                         name: getText(2),
@@ -433,62 +431,66 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 return data;
             }''')
 
-            # --- Python 端处理 (逻辑完全拆分) ---
+            # --- Python 端逻辑 (V7 容错升级) ---
             today_str = datetime.datetime.now().strftime("%Y-%m-%d")
             result_lines = []
             
-            # === 🔴 分支 A: 用户问“上市” ===
+            # === 🔴 分支 A: 问“上市” ===
             if is_asking_listing:
                 title = "🔔 <b>近期即将上市 / 待上市</b>"
-                # 排序逻辑：有日期的在前，待定的在后
                 confirmed = []
                 tbd = []
                 
                 for item in stocks_data:
                     code = item['code']
                     name = item['name']
-                    l_date = item['list_date'] # 上市日
-                    s_date = item['sub_date']  # 申购日(用于辅助判断是否为新股)
+                    l_date = item['list_date'] 
+                    s_date = item['sub_date']
                     
                     if not code or not code.isdigit(): continue
                     
-                    # 1. 明确日期 (未来或今天)
-                    if l_date and len(l_date) >= 10 and l_date != "-":
+                    # 1. 明确日期 (格式正常且是未来/今天)
+                    # 只要长度够长(比如 2025-12-12 是10位)，且是数字开头
+                    if len(l_date) >= 8 and l_date[0].isdigit():
                         if l_date >= today_str:
-                            display = l_date[5:] # 12-05
+                            display = l_date[5:] if len(l_date)>=10 else l_date
                             confirmed.append(f"• <code>{code}</code> <b>{name}</b> ({display} 上市)")
                     
-                    # 2. 待定 (核心: 日期是-, 且有申购日说明是正经新股)
-                    elif "-" in l_date and s_date and len(s_date) >= 5:
-                        tbd.append(f"• <code>{code}</code> <b>{name}</b> (待定)")
+                    # 2. 待定 (容错逻辑)
+                    # 只要它“不是明确日期”(比如空的、横杠)，并且有申购日(说明是正经新股)
+                    # 就不管它到底显示什么符号，统统算作“待定”
+                    elif s_date and len(s_date) >= 5:
+                         tbd.append(f"• <code>{code}</code> <b>{name}</b> (待定)")
                 
-                # 合并列表
+                # 去重排序
                 confirmed = sorted(list(set(confirmed)))
-                tbd = sorted(list(set(tbd))) # 待定列表不用按日期排，直接按代码或默认
+                tbd = sorted(list(set(tbd)))
                 result_lines = confirmed + tbd
                 
-            # === 🔵 分支 B: 用户问“申购/新股” ===
+            # === 🔵 分支 B: 问“申购” ===
             else:
                 title = "📅 <b>近期即将申购</b>"
                 temp_list = []
                 for item in stocks_data:
                     code = item['code']
                     name = item['name']
-                    s_date = item['sub_date'] # 申购日
+                    s_date = item['sub_date']
                     
                     if not code or not code.isdigit(): continue
                     
                     # 只看申购日是今天或未来的
-                    if s_date and len(s_date) >= 10 and s_date != "-":
+                    if len(s_date) >= 8 and s_date[0].isdigit():
                         if s_date >= today_str:
-                            display = s_date[5:] # 12-05
+                            display = s_date[5:] if len(s_date)>=10 else s_date
                             temp_list.append(f"• <code>{code}</code> <b>{name}</b> ({display} 申购)")
                 
                 result_lines = sorted(list(set(temp_list)))
 
             # --- 发送结果 ---
             if not result_lines:
-                await safe_reply(update, f"📭 数据获取成功，但近期暂无{'上市' if is_asking_listing else '申购'}计划。")
+                # 如果还是空的，为了调试，我把获取到的前3条原始数据打出来给您看
+                debug_info = str(stocks_data[:3]) if stocks_data else "未提取到任何行"
+                await safe_reply(update, f"📭 数据列表为空。调试信息: {debug_info}")
             else:
                 final_msg = f"{title}\n" + "\n".join(result_lines)
                 await safe_reply(update, final_msg, parse_mode='HTML')
