@@ -69,6 +69,8 @@ ANDROID_BROWSER_PATTERN = r"^(安卓浏览器手机版|安卓桌面版|安卓浏
 IOS_BROWSER_PATTERN = r"^(苹果浏览器手机版|苹果浏览器|苹果桌面版)$"
 ANDROID_TAB_LIMIT_PATTERN = r"^(安卓窗口上限|窗口上限|标签上限)$"
 IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
+# 🔥 [新增] 新股查询正则
+IPO_COMMAND_PATTERN = r"^(新股|新股申购|新股上市|近期新股|申购|上市)$"
 
 
 # --- 辅助函数 ---
@@ -321,26 +323,22 @@ async def send_global_video(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         except Exception: pass
 
 
-# --- 🔥 [新增] 计算器逻辑 ---
+# --- 🔥 计算器逻辑 ---
 def safe_calculate(expression: str):
     """安全计算逻辑 - 支持文本混合模式"""
     try:
         # --- 1. 预处理：清洗数据 (关键修改) ---
-        # 允许中文和文字混排，我们将它们视为"注释"并过滤掉
-        # 逻辑：将所有 [不是] 数字、小数点、运算符的字符，全部替换为空字符串
-        # 保留字符: 0-9, +, -, *, /, (, ), ., %, ^
         cleaned_expr = re.sub(r'[^\d\+\-\*\/\(\)\.\%\^]', '', expression)
 
         # --- 2. 检查清洗后的算式是否有效 ---
         if not cleaned_expr:
-            return None # 如果清洗完是空的（比如发了纯文字"你好"），不回复
+            return None 
         
         # 边缘情况防止：如果清洗完只剩一个小数点或运算符
         if len(cleaned_expr) == 1 and cleaned_expr in '+-*/.^%':
             return None
 
         # --- 3. 符号标准化 ---
-        # (这部分和你原有的逻辑保持一致)
         final_expr = cleaned_expr.replace('^', '**')
         
         # --- 4. 长度限制 ---
@@ -348,8 +346,6 @@ def safe_calculate(expression: str):
             return "❌ 算式太长了。"
 
         # --- 5. 执行计算 ---
-        # 使用 simple_eval 或者 eval (注意安全)
-        # 这里假设你已经引入了 simple_eval
         result = simple_eval(final_expr)
         
         # 格式化输出：如果是整数，去掉 .0
@@ -359,19 +355,92 @@ def safe_calculate(expression: str):
         return f"🔢 结果: {result}"
 
     except SyntaxError:
-        # 比如提取出了 "123++23"，会导致语法错误
         return "❌ 格式错误 (请检查运算符)"
     except ZeroDivisionError:
         return "❌ 不能除以零"
     except Exception:
         return None
-# --- 🔥 [修改后] 计算器 Bot 设置 (支持连续计算) ---
-# --- 🔥 [修复版] 解决除法(/)被当做命令忽略的问题 ---
+
+# --- 🔥 [新增功能] 获取 A 股新股数据逻辑 ---
+async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """从东财接口获取近期申购与上市新股"""
+    # 东方财富公开 API
+    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    params = {
+        "reportName": "RPT_NEWBOARD_IPOALL",
+        "columns": "SECURITY_CODE,SECURITY_NAME,APPLY_DATE,LISTING_DATE",
+        "sortColumns": "APPLY_DATE",
+        "sortTypes": "-1",  # 倒序
+        "pageSize": "50",   # 抓取最近 50 条足够覆盖
+        "pageNumber": "1"
+    }
+
+    try:
+        await safe_reply(update, "🔍 正在查询A股新股日历，请稍候...")
+        
+        if GLOBAL_HTTP_CLIENT is None:
+            raise RuntimeError("HTTP Client not ready")
+
+        resp = await GLOBAL_HTTP_CLIENT.get(url, params=params)
+        data = resp.json()
+        
+        if not data.get("result") or not data["result"].get("data"):
+            await safe_reply(update, "❌ 暂时无法获取新股数据。")
+            return
+
+        stock_list = data["result"]["data"]
+        
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        
+        apply_stocks = []   # 即将/今日申购
+        listing_stocks = [] # 即将/今日上市
+
+        for stock in stock_list:
+            code = stock.get("SECURITY_CODE", "")
+            name = stock.get("SECURITY_NAME", "")
+            apply_date = stock.get("APPLY_DATE")
+            listing_date = stock.get("LISTING_DATE")
+            
+            # 处理时间字符串 (API返回通常是 "2023-10-27 00:00:00")
+            if apply_date: apply_date = apply_date.split(" ")[0]
+            if listing_date: listing_date = listing_date.split(" ")[0]
+
+            # 筛选：申购日期 >= 今天
+            if apply_date and apply_date >= today:
+                apply_stocks.append(f"• <code>{code}</code> <b>{name}</b> ({apply_date[5:]})")
+            
+            # 筛选：上市日期 >= 今天
+            if listing_date and listing_date >= today:
+                listing_stocks.append(f"• <code>{code}</code> <b>{name}</b> ({listing_date[5:]})")
+
+        # 排序：日期越近越靠前
+        apply_stocks.sort()
+        listing_stocks.sort()
+
+        msg_parts = []
+        if apply_stocks:
+            msg_parts.append("📅 <b>近期即将申购</b>\n" + "\n".join(apply_stocks))
+        if listing_stocks:
+            msg_parts.append("🔔 <b>近期即将上市</b>\n" + "\n".join(listing_stocks))
+            
+        if not msg_parts:
+            final_msg = "📭 近期暂无待申购或待上市的新股。"
+        else:
+            final_msg = "\n\n".join(msg_parts)
+            
+        await safe_reply(update, final_msg, parse_mode='HTML')
+
+    except Exception as e:
+        logger.error(f"获取新股数据失败: {e}")
+        await safe_reply(update, "❌ 数据获取失败，请稍后重试。")
+
+
+# --- 🔥 [修改后] 计算器 Bot 设置 (支持连续计算 + 新股查询) ---
 def setup_calculator_bot(app_instance: Application) -> None:
     """初始化计算器 Bot 的 Handler"""
     
     async def calc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await safe_reply(update, "👋 我是智能计算器。\n\n1️⃣ 发送算式 (如 `100 * 5`)\n2️⃣ 回复我的结果并发送 `/2` 或 `*2` 可继续计算。")
+        await safe_reply(update, "👋 我是智能计算器。\n\n1️⃣ 发送算式 (如 `100 * 5`)\n2️⃣ 回复结果 `/2` 可继续计算。\n3️⃣ 发送 <b>新股</b> 查询A股申购/上市列表。", parse_mode='HTML')
 
     async def calc_handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not update.message or not update.message.text: return
@@ -412,8 +481,10 @@ def setup_calculator_bot(app_instance: Application) -> None:
     # 1. 先注册 /start 命令
     app_instance.add_handler(CommandHandler("start", calc_start))
     
-    # 2. 🔥 关键修改：这里去掉了 (~filters.COMMAND)
-    # 这样 /2, /9 这种看起来像命令的算式也能被处理了
+    # 2. 🔥 优先注册新股查询 (防止 "新股" 两个字进入计算逻辑报错)
+    app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(IPO_COMMAND_PATTERN), get_stock_ipo_info))
+
+    # 3. 最后注册通用文本计算
     app_instance.add_handler(MessageHandler(filters.TEXT, calc_handle_message))
 
 # --- Setup Bot (原有) ---
@@ -530,7 +601,7 @@ async def startup_event():
                 }
             logger.info(f"Bot #{i} ({token[-4:]}) 加载完成")
 
-    # --- 🔥 [新增] 计算器 Bot 初始化 ---
+    # --- 🔥 计算器 Bot 初始化 ---
     calc_token = os.getenv("CALC_BOT_TOKEN")
     if calc_token:
         try:
@@ -540,8 +611,7 @@ async def startup_event():
             # 设置计算器专用的 Handler
             setup_calculator_bot(calc_app)
             
-            # 注册到 Webhook 路由中，路径设为 'calc_bot_webhook'
-            # Render 的 Webhook URL 后面要填这个：https://your-app.onrender.com/calc_bot_webhook
+            # 注册到 Webhook 路由中
             BOT_APPLICATIONS["calc_bot_webhook"] = calc_app
             logger.info(f"🧮 计算器 Bot ({calc_token[-4:]}) 加载完成")
         except Exception as e:
