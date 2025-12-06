@@ -361,28 +361,38 @@ def safe_calculate(expression: str):
     except Exception:
         return None
 
-# --- 🔥 [修改后] 获取 A 股新股数据逻辑 (修复报表名称错误) ---
+# --- 🔥 [最终修复版] 获取 A 股新股数据逻辑 (双重接口保险) ---
 async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """从东财接口获取近期申购与上市新股"""
-    # 东方财富公开 API
-    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    """从东财接口获取近期申购与上市新股 - 包含失败自动重试机制"""
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://data.eastmoney.com/",
-        "Accept": "*/*"
-    }
-
-    # 🔥 核心修复: reportName 改为 'RPT_IPO_APPLYLIST' (这是目前可用的正确表名)
-    params = {
-        "reportName": "RPT_IPO_APPLYLIST", 
-        "columns": "ALL", 
-        "source": "WEB",
-        "client": "WEB",
+    # 方案 A: 针对 https://data.eastmoney.com/xg/xg/ 的标准接口
+    # 关键修改：去掉 source 参数，且明确指定 columns，防止 9501 错误
+    url_primary = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    params_primary = {
+        "reportName": "RPT_IPO_APPLYLIST",
+        "columns": "SECURITY_CODE,SECURITY_NAME,APPLY_DATE,LISTING_DATE", # 🔥 关键：不要用 ALL
         "sortColumns": "APPLY_DATE",
         "sortTypes": "-1",
         "pageSize": "50",
         "pageNumber": "1"
+        # 注意：这里故意去掉了 source 和 client 参数
+    }
+
+    # 方案 B: 备用接口 (如果不申购列表挂了，就查新股一览)
+    params_fallback = {
+        "reportName": "RPT_NEWBOARD_IPOALL",
+        "columns": "SECURITY_CODE,SECURITY_NAME,APPLY_DATE,LISTING_DATE",
+        "sortColumns": "APPLY_DATE",
+        "sortTypes": "-1",
+        "pageSize": "50",
+        "pageNumber": "1"
+    }
+
+    # 伪装头 (必须带 Referer)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://data.eastmoney.com/",
+        "Accept": "*/*"
     }
 
     try:
@@ -391,35 +401,43 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if GLOBAL_HTTP_CLIENT is None:
             raise RuntimeError("HTTP Client not ready")
 
-        resp = await GLOBAL_HTTP_CLIENT.get(url, params=params, headers=headers)
-        data = resp.json()
-        
-        # 调试日志：如果这次还有错，日志里会显示新的错误信息
-        if not data.get("result"):
-             logger.warning(f"⚠️ 东财API返回异常: {data}")
+        # --- 尝试方案 A ---
+        try:
+            resp = await GLOBAL_HTTP_CLIENT.get(url_primary, params=params_primary, headers=headers)
+            data = resp.json()
+            
+            # 如果方案 A 失败 (返回 9501 或 result 为空)，手动抛出错误进入方案 B
+            if not data.get("result") or not data["result"].get("data"):
+                logger.warning(f"方案A (RPT_IPO_APPLYLIST) 失败: {data.get('message', '无数据')}, 尝试方案B...")
+                raise ValueError("Primary API Failed")
+                
+        except Exception:
+            # --- 尝试方案 B (备用) ---
+            resp = await GLOBAL_HTTP_CLIENT.get(url_primary, params=params_fallback, headers=headers)
+            data = resp.json()
 
+        # 检查最终数据
         if not data.get("result") or not data["result"].get("data"):
-            await safe_reply(update, "❌ 接口配置已更新，请检查日志获取最新参数。")
+            logger.error(f"❌ 所有方案均失败。最终返回: {data}")
+            await safe_reply(update, "❌ 无法获取新股数据 (API限制)，请稍后重试。")
             return
 
         stock_list = data["result"]["data"]
         
+        # 获取当前日期
         today = datetime.datetime.now().strftime("%Y-%m-%d")
         
         apply_stocks = []   # 即将/今日申购
         listing_stocks = [] # 即将/今日上市
 
         for stock in stock_list:
-            # RPT_IPO_APPLYLIST 的字段名通常是大写的，容错处理
             code = stock.get("SECURITY_CODE", "")
             name = stock.get("SECURITY_NAME", "")
-            
-            apply_date = stock.get("APPLY_DATE")
-            listing_date = stock.get("LISTING_DATE")
-            
-            # 格式化日期，去掉时分秒
-            if apply_date: apply_date = str(apply_date).split(" ")[0]
-            if listing_date: listing_date = str(listing_date).split(" ")[0]
+            apply_date = str(stock.get("APPLY_DATE", "")).split(" ")[0]
+            listing_date = str(stock.get("LISTING_DATE", "")).split(" ")[0]
+
+            # 过滤无效数据
+            if not code or not name: continue
 
             # 筛选：申购日期 >= 今天
             if apply_date and apply_date >= today:
@@ -430,11 +448,14 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 listing_stocks.append(f"• <code>{code}</code> <b>{name}</b> ({listing_date[5:]})")
 
         msg_parts = []
+        # 将申购列表按日期正序排列（最近的在上面）
         if apply_stocks:
-            # 列表翻转一下，让最近日期的在最上面 (API是倒序回来的)
-            msg_parts.append("📅 <b>近期即将申购</b>\n" + "\n".join(sorted(apply_stocks)))
+            apply_stocks.sort() 
+            msg_parts.append("📅 <b>近期即将申购</b>\n" + "\n".join(apply_stocks))
+        
         if listing_stocks:
-            msg_parts.append("🔔 <b>近期即将上市</b>\n" + "\n".join(sorted(listing_stocks)))
+            listing_stocks.sort()
+            msg_parts.append("🔔 <b>近期即将上市</b>\n" + "\n".join(listing_stocks))
             
         if not msg_parts:
             final_msg = f"📭 近期 ({today} 起) 暂无待申购或待上市的新股。"
@@ -444,7 +465,7 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await safe_reply(update, final_msg, parse_mode='HTML')
 
     except Exception as e:
-        logger.error(f"获取新股数据代码报错: {e}")
+        logger.error(f"获取新股数据代码严重报错: {e}")
         await safe_reply(update, "❌ 数据处理出错，请查看 Logs。")
         
 # --- 🔥 [修改后] 计算器 Bot 设置 (支持连续计算 + 新股查询) ---
