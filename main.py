@@ -361,7 +361,7 @@ def safe_calculate(expression: str):
     except Exception:
         return None
 
-# --- 🔥 [最终完善版] 新浪财经精准数据 (含待定日期) ---
+# --- 🔥 [最终完善版 V3.0] 新浪财经精准数据 (含待定日期) ---
 async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BROWSER_INSTANCE
 
@@ -398,7 +398,7 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(1) # 稍等渲染
 
-            # 📸 步骤 1: 截图 (留底)
+            # 📸 步骤 1: 截图 (留底，方便您核对)
             try:
                 screenshot_bytes = await page.screenshot(full_page=False)
                 await update.message.reply_photo(photo=screenshot_bytes, caption="📸 新浪财经实时数据")
@@ -407,7 +407,9 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
             # 📝 步骤 2: 精准提取 (根据您的截图调整了列索引)
             stocks_data = await page.evaluate('''() => {
-                const table = document.getElementById('NewStockIssueTable');
+                // 尝试获取特定的表格，如果找不到就找页面第一个大表格
+                let table = document.getElementById('NewStockIssueTable');
+                if (!table) table = document.querySelector('table'); 
                 if (!table) return [];
                 
                 const rows = table.querySelectorAll('tbody tr');
@@ -465,14 +467,13 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     display_date = l_date[5:] if len(l_date) >= 10 else l_date
                     listing_list.append(f"• <code>{code}</code> <b>{name}</b> ({display_date})")
                 
-                # 情况B: 日期未定(-)，但申购日期是最近的(比如最近一个月内)，说明是“待上市”
-                # 为了防止把几年前的旧数据捞出来，我们加一个限制：申购日期必须在过去60天以内或未来
+                # 情况B: 日期未定(-)，但申购日期是最近的(比如最近一个月内)或者是未来的，说明是“待上市”
                 elif l_date == "-":
-                    # 简单判断：如果申购日存在，且申购日 >= 两个月前
-                    # 这里简化处理：只要 s_date >= (今天 - 30天)，就认为是“待上市”
                     try:
+                        # 获取30天前的日期
                         last_month = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime("%Y-%m-%d")
-                        if s_date >= last_month:
+                        # 逻辑：只要申购日期 >= 30天前，就算作“正在排队上市”
+                        if s_date and s_date >= last_month:
                              listing_list.append(f"• <code>{code}</code> <b>{name}</b> (待定)")
                     except:
                         pass
@@ -480,7 +481,8 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # --- 3. 排序与去重 ---
             # 申购按日期排序
             apply_list = sorted(list(set(apply_list)))
-            # 上市列表：把有日期的排前面，"待定"的排后面
+            
+            # 上市列表：分开排序，有日期的在前，待定的在后
             listing_list_dated = sorted([x for x in listing_list if "待定" not in x])
             listing_list_tbd = sorted([x for x in listing_list if "待定" in x])
             final_listing = listing_list_dated + listing_list_tbd
