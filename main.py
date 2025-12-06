@@ -361,99 +361,96 @@ def safe_calculate(expression: str):
     except Exception:
         return None
 
-# --- 🔥 [最终方案] 浏览器去广告截图版 (无需注册/无需Token) ---
+# --- 🔥 [清爽路线] 新浪财经旧版数据 (无广告/无反爬) ---
 async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 引用全局浏览器实例
     global BROWSER_INSTANCE
 
     bot_id = context.bot_data.get("bot_index", "?")
     
-    # 1. 检查浏览器是否就绪
+    # 检查浏览器
     if not BROWSER_INSTANCE:
         if hasattr(app.state, 'browser') and app.state.browser:
             BROWSER_INSTANCE = app.state.browser
         else:
             logger.error(f"🤖 [Bot #{bot_id}] ❌ 浏览器未启动")
-            await safe_reply(update, "❌ 浏览器服务未就绪，请联系管理员。")
+            await safe_reply(update, "❌ 浏览器服务未就绪。")
             return
 
-    await safe_reply(update, "🔍 正在启动浏览器访问 (自动去广告模式)...")
+    await safe_reply(update, "🔍 正在访问新浪财经数据中心 (清爽版)...")
     
-    target_url = "https://data.eastmoney.com/xg/xg/default.html"
+    # 新浪财经-新股发行-旧版页面 (纯表格，无乱七八糟的JS和广告)
+    target_url = "https://vip.stock.finance.sina.com.cn/corp/go.php/vRPD_NewStockIssue/page/1.phtml"
+    
     page = None
     browser_context = None
 
-    # 加锁
     async with BROWSER_LOCK:
         try:
-            logger.info(f"🤖 [Bot #{bot_id}] 🚀 访问东财页面: {target_url}")
+            logger.info(f"🤖 [Bot #{bot_id}] 🚀 访问新浪页面: {target_url}")
             
-            # 创建新页面 (1920x1200)
+            # 创建上下文
             browser_context = await BROWSER_INSTANCE.new_context(
+                # 使用桌面 UA 即可，因为这个旧版页面本身就很简单
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                viewport={'width': 1920, 'height': 1200},
-                device_scale_factor=1.5
+                viewport={'width': 1280, 'height': 800}
             )
             page = await browser_context.new_page()
             
-            # 访问页面 (domcontentloaded 即可，不等广告图片加载完)
+            # 访问页面 (domcontentloaded 即可)
             await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
             
-            # ⏳ 稍微等一下，让弹窗弹出来，这样我们才能关掉它
-            await asyncio.sleep(2)
-
-            # 🔥🔥🔥 [核心] 暴力去广告/关弹窗脚本 🔥🔥🔥
-            logger.info("🔪 执行去广告脚本...")
-            await page.evaluate('''() => {
-                // 1. 尝试点击常见的关闭按钮 (class 包含 close)
-                const closers = document.querySelectorAll('.u-mask-close, .frame-close, [class*="close"]');
-                closers.forEach(el => {
-                    console.log("点击关闭按钮:", el);
-                    el.click();
-                });
-
-                // 2. 暴力删除所有遮罩层 (mask) 和 弹窗 (popup)
-                // 东财的广告通常在 .u-mask 或 .activity-modal 里
-                const trashes = document.querySelectorAll('.u-mask, .activity-modal, [class*="popup"], [class*="modal"]');
-                trashes.forEach(el => el.remove());
-                
-                // 3. 强制把表格区域显示出来 (防止被隐藏)
-                const table = document.querySelector('table');
-                if(table) table.style.visibility = 'visible';
-            }''')
-            
-            # 再睡 1 秒等页面刷新
+            # 新浪这个页面是静态的，几乎不用等，但为了保险睡 1 秒
             await asyncio.sleep(1)
 
-            # 📸 步骤 1: 截图 (这时候应该是干净的表格了)
+            # 📸 步骤 1: 截图 (您会看到一张非常复古的表格)
             try:
                 screenshot_bytes = await page.screenshot(full_page=False)
-                await update.message.reply_photo(photo=screenshot_bytes, caption="📸 实时申购日历 (已去广告)")
+                await update.message.reply_photo(photo=screenshot_bytes, caption="📸 新浪财经实时数据")
             except Exception as e:
                 logger.error(f"截图失败: {e}")
 
-            # 📝 步骤 2: 提取文字 (双重保险)
+            # 📝 步骤 2: 提取文字
+            # 新浪的表格 ID 通常是 NewStockIssueTable
             stocks_data = await page.evaluate('''() => {
-                const rows = document.querySelectorAll('table tbody tr');
+                const table = document.getElementById('NewStockIssueTable');
+                if (!table) return [];
+                
+                const rows = table.querySelectorAll('tbody tr');
                 const data = [];
-                rows.forEach(row => {
+                
+                // 跳过表头，从第2行开始
+                for (let i = 1; i < rows.length; i++) {
+                    const row = rows[i];
                     const cells = row.querySelectorAll('td');
-                    if (cells.length < 5) return;
+                    if (cells.length < 5) continue;
                     
                     const getText = (idx) => cells[idx] ? cells[idx].innerText.trim() : "";
                     
-                    // 东财表格结构：Code(1), Name(2), DateInfo(整行)
+                    // 新浪旧版表格结构 (非常稳定):
+                    // col 0: 证券代码 (000xxx)
+                    // col 1: 证券简称 (xxx)
+                    // col 2: 申购代码
+                    // ...
+                    // col 7: 上市日期
+                    // col 8: 申购日期 (注意：新浪有时候把申购日放在后面，具体看页面)
+                    
+                    // 我们直接暴力把整行拿回来处理，反正数据量不大
                     data.push({
-                        code: getText(1),
-                        name: getText(2),
-                        full_text: row.innerText
+                        code: getText(0),
+                        name: getText(1),
+                        t1: getText(7), // 可能是上市日
+                        t2: getText(8), // 可能是申购日
+                        full_text: row.innerText 
                     });
-                });
+                }
                 return data;
             }''')
 
             # --- Python 端数据清洗 ---
-            today_str = datetime.datetime.now().strftime("%m-%d")
+            today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+            # 简短版日期用于显示 (12-06)
+            today_short = datetime.datetime.now().strftime("%m-%d")
+
             msg_list = []
             
             for item in stocks_data:
@@ -463,38 +460,38 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 
                 if not code or not code.isdigit(): continue
 
-                # 提取日期 (格式如 12-06)
-                dates = re.findall(r'\d{2}-\d{2}', full_text)
+                # 新浪的日期格式通常是 "2023-12-06"
+                # 我们提取所有 YYYY-MM-DD
+                dates = re.findall(r'\d{4}-\d{2}-\d{2}', full_text)
                 
-                # 筛选今天及以后的
                 is_future = False
                 found_date = ""
+                
                 for d in dates:
+                    # 比较日期字符串 "2023-12-06" >= "2023-12-06"
                     if d >= today_str:
                         is_future = True
-                        found_date = d
+                        # 转成短日期显示 12-06
+                        found_date = d[5:] 
                         break
                 
                 if is_future:
                    msg_list.append(f"• <code>{code}</code> <b>{name}</b> ({found_date})")
 
             if msg_list:
+                # 去重并排序
                 msg_list = sorted(list(set(msg_list)))
-                final_msg = "📅 <b>近期新股数据</b>\n" + "\n".join(msg_list)
+                final_msg = "📅 <b>A股新股日历 (新浪源)</b>\n" + "\n".join(msg_list)
                 await safe_reply(update, final_msg, parse_mode='HTML')
             else:
-                await safe_reply(update, "📭 截图如上。文字提取暂无数据 (可能是近期确实无新股)。")
+                await safe_reply(update, "📭 数据获取成功(见图)，但近期暂无新股申购/上市。")
 
         except Exception as e:
             logger.error(f"浏览器操作报错: {e}")
             await safe_reply(update, f"❌ 访问出错: {e}")
         finally:
-            if page: 
-                try: await page.close()
-                except: pass
-            if browser_context: 
-                try: await browser_context.close()
-                except: pass
+            if page: await page.close()
+            if browser_context: await browser_context.close()
         
 # --- 🔥 [修改后] 计算器 Bot 设置 (支持连续计算 + 新股查询) ---
 def setup_calculator_bot(app_instance: Application) -> None:
