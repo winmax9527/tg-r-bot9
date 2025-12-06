@@ -361,125 +361,133 @@ def safe_calculate(expression: str):
     except Exception:
         return None
 
-# --- 🔥 [终极核武版] 使用浏览器 (Playwright) 视觉抓取 ---
+# --- 🔥 [绝对暴力版] 浏览器截图 + 文字提取 ---
 async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    既然API不让访问，那就直接用浏览器打开网页去“看”。
-    原理：完全模拟真人打开东财网页，等待表格加载，然后提取文字。
-    """
-    # 东财新股数据页面 (就是您截图的那个页面)
-    target_url = "https://data.eastmoney.com/xg/xg/default.html"
-    
-    # 获取 Bot ID 用于日志
+    # 引用全局变量，这是最稳的方式，不再通过 context 传递
+    global BROWSER_INSTANCE
+
+    # 获取 Bot ID
     bot_id = context.bot_data.get("bot_index", "?")
     
-    fastapi_app = context.bot_data.get("fastapi_app")
-    if not fastapi_app or not hasattr(fastapi_app.state, 'browser'):
-        await safe_reply(update, "❌ 浏览器服务未就绪。")
-        return
+    # 1. 检查浏览器是否活着
+    if not BROWSER_INSTANCE:
+        # 尝试最后的抢救，看看能不能引用到 app 里的
+        if hasattr(app.state, 'browser') and app.state.browser:
+            BROWSER_INSTANCE = app.state.browser
+        else:
+            logger.error(f"🤖 [Bot #{bot_id}] ❌ 严重错误: 全局 BROWSER_INSTANCE 为空")
+            await safe_reply(update, "❌ 浏览器服务意外停止，请联系管理员重启服务。")
+            return
 
-    await safe_reply(update, "🔍 正在启动浏览器访问东财页面，这可能需要几秒钟...")
+    await safe_reply(update, "🔍 正在前往东财网页截图，请稍候...")
     
+    target_url = "https://data.eastmoney.com/xg/xg/default.html"
     page = None
     browser_context = None
 
-    # 🔥 加上并发锁，防止和下载链接功能冲突
+    # 加锁防止内存爆炸
     async with BROWSER_LOCK:
         try:
-            logger.info(f"🤖 [Bot #{bot_id}] 启动浏览器抓取新股数据...")
+            logger.info(f"🤖 [Bot #{bot_id}] 🚀 开始浏览器任务: {target_url}")
             
-            # 创建新页面
-            browser_context = await fastapi_app.state.browser.new_context(
+            # 创建上下文 (设置大窗口，保证截图清晰)
+            browser_context = await BROWSER_INSTANCE.new_context(
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                viewport={'width': 1920, 'height': 1080} # 大屏幕防折叠
+                viewport={'width': 1920, 'height': 1200},
+                device_scale_factor=2 # 高清截图
             )
+            
             page = await browser_context.new_page()
             
-            # 访问页面
-            await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            # 访问网页
+            await page.goto(target_url, wait_until="networkidle", timeout=45000)
             
-            # 🔥 关键：等待表格里的数据加载出来
-            # 东财的数据是异步加载的，我们等包含股票代码的链接出现
+            # 等待表格加载 (最多等 10 秒)
             try:
-                # 等待第一行数据的股票代码出现 (class="code")
-                await page.wait_for_selector('table tbody tr td a', timeout=10000)
-            except Exception:
-                logger.warning("等待表格超时，可能页面加载慢，尝试直接读取...")
+                await page.wait_for_selector('table', timeout=10000)
+            except:
+                logger.warning("等待表格超时，尝试直接截图")
 
-            # 🔥 执行 JS 脚本提取数据 (在浏览器内部运行)
-            # 我们直接在浏览器里把表格解析成 JSON 返回给 Python
+            # 🔥 【核心功能】先发一张截图，证明真的进去了
+            screenshot_bytes = await page.screenshot(full_page=False)
+            try:
+                await update.message.reply_photo(photo=screenshot_bytes, caption="📸 东财实时网页快照")
+            except Exception as e:
+                logger.error(f"发送截图失败: {e}")
+
+            # 🔥 【文字提取】尝试解析数据
+            logger.info("正在执行JS解析表格...")
             stocks_data = await page.evaluate('''() => {
+                // 针对 data.eastmoney.com/xg/xg/default.html 的特定结构
                 const rows = document.querySelectorAll('table tbody tr');
                 const data = [];
                 rows.forEach(row => {
                     const cells = row.querySelectorAll('td');
-                    if (cells.length < 10) return;
+                    // 只要行内单元格够多，就认为是数据行
+                    if (cells.length < 5) return;
                     
-                    // 东财表格结构：
-                    // 第2列: 股票代码
-                    // 第3列: 股票名称
-                    // 第4列: 申购日期
-                    // 第12列: 上市日期 (根据实际页面结构可能变动，我们取innerText)
+                    const getText = (idx) => cells[idx] ? cells[idx].innerText.trim() : "-";
                     
-                    // 安全获取文字的辅助函数
-                    const getText = (idx) => cells[idx] ? cells[idx].innerText.trim() : "";
+                    // 根据您截图的表头顺序:
+                    // 1: 股票代码, 2: 股票名称, 3: 申购代码, 4: 发行价... 
+                    // 申购日期通常在后面，我们需要动态找一下或者取固定位置
+                    // 东财这个页面的申购日期通常是第 10 列左右
                     
+                    // 为了保险，我们把关键信息都拿出来
                     data.push({
-                        code: getText(1), // 索引从0开始，第2列是1
+                        code: getText(1),
                         name: getText(2),
-                        apply_date: getText(3),
-                        listing_date: getText(11) // 上市日期通常在后面
+                        date_info: row.innerText // 把整行文字拿回来自己在 Python 里洗
                     });
                 });
                 return data;
             }''')
-            
-            logger.info(f"浏览器抓取成功，获取到 {len(stocks_data)} 条数据")
-            
-            # --- 数据处理 ---
-            today = datetime.datetime.now().strftime("%Y-%m-%d")
-            apply_stocks = []
-            listing_stocks = []
-            
-            for stock in stocks_data:
-                code = stock['code']
-                name = stock['name']
-                # 网页上的日期可能是 "2025-12-15" 或 "-"
-                a_date = stock['apply_date']
-                l_date = stock['listing_date']
-                
-                # 简单清洗：必须是数字开头的代码
-                if not code or not code.isdigit(): continue
-                
-                # 筛选申购
-                if a_date and a_date >= today and "-" in a_date:
-                    apply_stocks.append(f"• <code>{code}</code> <b>{name}</b> ({a_date[5:]})")
-                
-                # 筛选上市
-                if l_date and l_date >= today and "-" in l_date:
-                    listing_stocks.append(f"• <code>{code}</code> <b>{name}</b> ({l_date[5:]})")
 
-            # --- 组装消息 ---
-            msg_parts = []
-            if apply_stocks:
-                # 网页默认是倒序，我们翻转一下让最近的在上面，或者直接排序
-                apply_stocks.sort()
-                msg_parts.append("📅 <b>近期即将申购</b>\n" + "\n".join(apply_stocks))
+            # --- Python 端简单清洗 ---
+            today_str = datetime.datetime.now().strftime("%m-%d") # 格式如 12-06
+            today_full = datetime.datetime.now().strftime("%Y-%m-%d")
             
-            if listing_stocks:
-                listing_stocks.sort()
-                msg_parts.append("🔔 <b>近期即将上市</b>\n" + "\n".join(listing_stocks))
+            msg_list = []
+            
+            # 东财网页显示的日期通常是 "12-15 周一" 这种格式
+            # 我们简单匹配一下
+            
+            for item in stocks_data:
+                raw_text = item['date_info']
+                code = item['code']
+                name = item['name']
                 
-            if not msg_parts:
-                final_msg = f"📭 抓取成功，但近期 ({today} 起) 暂无新股数据。"
+                if not code or not code.isdigit(): continue
+
+                # 简单正则提取日期 (MM-DD)
+                # 寻找类似 12-06 这样的模式
+                dates = re.findall(r'\d{2}-\d{2}', raw_text)
+                
+                # 如果这一行里有日期大于等于今天的（简单的字符串比较）
+                # 注意：跨年的时候 "01-01" < "12-31" 会有点问题，但短期用够了
+                is_future = False
+                found_date = ""
+                for d in dates:
+                    if d >= today_str:
+                        is_future = True
+                        found_date = d
+                        break
+                
+                if is_future:
+                   msg_list.append(f"• <code>{code}</code> <b>{name}</b> ({found_date})")
+
+            if msg_list:
+                # 去重并排序
+                msg_list = sorted(list(set(msg_list)))
+                final_msg = "📅 <b>近期网页数据 (含申购/上市)</b>\n" + "\n".join(msg_list)
+                await safe_reply(update, final_msg, parse_mode='HTML')
             else:
-                final_msg = "\n\n".join(msg_parts)
-            
-            await safe_reply(update, final_msg, parse_mode='HTML')
+                await safe_reply(update, "📭 网页已加载 (见上图)，但未提取到近期文字数据。")
 
         except Exception as e:
-            logger.error(f"浏览器抓取失败: {e}")
-            await safe_reply(update, "❌ 浏览器也无法读取页面，这真的是尴尬了...")
+            logger.error(f"🤖 浏览器操作报错: {e}")
+            await safe_reply(update, f"❌ 网页访问出错: {str(e)}")
+            
         finally:
             if page: await page.close()
             if browser_context: await browser_context.close()
