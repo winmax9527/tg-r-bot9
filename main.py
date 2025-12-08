@@ -538,12 +538,9 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown():
-    # 1. 清理全局资源
-    if GLOBAL_HTTP_CLIENT: await GLOBAL_HTTP_CLIENT.aclose()
-    if BROWSER_INSTANCE: await BROWSER_INSTANCE.close()
-    if PLAYWRIGHT_INSTANCE: await PLAYWRIGHT_INSTANCE.stop()
+    logger.info("Starting graceful shutdown...")
 
-    # 2. 优雅关闭所有 Bot
+    # 1. 先关闭 Bot（让它们先断开与 Telegram 的连接）
     for b in BOT_APPLICATIONS.values():
         try:
             if b.updater and b.updater.running:
@@ -553,3 +550,10 @@ async def shutdown():
             await b.shutdown()
         except Exception as e:
             logger.error(f"Error shutting down bot: {e}")
+
+    # 2. 所有的 Bot 都安全躺平了，再拔掉基础设施的电源（浏览器、HTTP客户端）
+    if GLOBAL_HTTP_CLIENT: await GLOBAL_HTTP_CLIENT.aclose()
+    if BROWSER_INSTANCE: await BROWSER_INSTANCE.close()
+    if PLAYWRIGHT_INSTANCE: await PLAYWRIGHT_INSTANCE.stop()
+    
+    logger.info("Shutdown complete.")
