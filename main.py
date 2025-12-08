@@ -229,21 +229,67 @@ async def call_gemini(prompt: str, model: str = "gemini-2.5-flash") -> str:
         return f"AI Error: {resp.status_code}"
     except Exception as e: return f"Net Error: {e}"
 
-# 新股查询 (截图版)
+# ==============================================================================
+# 修正后的 get_ipo_info (截图 + 抓取文字)
+# ==============================================================================
 async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(update, "CalcBot", "IPO Query")
     if not BROWSER_INSTANCE: return await safe_reply(update, "❌ 浏览器未就绪")
+    
     await safe_reply(update, "🔍 正在检索新股数据...")
+    
     async with BROWSER_LOCK:
+        page = None
         try:
             page = await BROWSER_INSTANCE.new_page()
+            # 1. 打开新浪财经新股页面
             await page.goto("https://vip.stock.finance.sina.com.cn/corp/go.php/vRPD_NewStockIssue/page/1.phtml", timeout=30000)
-            await page.wait_for_load_state("domcontentloaded")
+            
+            # 等待表格加载出来，确保数据有了
+            try:
+                await page.wait_for_selector("#NewStockTable", state="visible", timeout=10000)
+            except:
+                pass # 如果没找到ID，可能直接截图也可以，不强求
+
+            # 2. 📸 截图并发送 (保持你原有的功能)
             img = await page.screenshot(full_page=False)
             await update.message.reply_photo(photo=img, caption="📸 新浪财经实时数据")
-            await page.close()
+
+            # 3. 📝 抓取表格文字数据 (新增功能)
+            # 使用 JS 直接在浏览器里提取前 15 行数据
+            rows_data = await page.evaluate('''() => {
+                const rows = Array.from(document.querySelectorAll('#NewStockTable tr')).slice(2); // 跳过表头
+                return rows.slice(0, 15).map(tr => {
+                    const tds = tr.querySelectorAll('td');
+                    if (tds.length < 4) return null;
+                    // tds[0]:代码, tds[1]:名称, tds[2]:上网日期, tds[3]:上市日期
+                    return {
+                        code: tds[0].innerText.trim(),
+                        name: tds[1].innerText.trim(),
+                        date: tds[3].innerText.trim()
+                    };
+                }).filter(item => item !== null);
+            }''')
+
+            # 4. 组装文字并发送
+            if rows_data:
+                msg_lines = ["🔔 <b>近期即将上市 / 待上市</b>"]
+                for item in rows_data:
+                    # 如果日期为空，显示 (待定)
+                    date_str = item['date'] if item['date'] else "(待定)"
+                    # 格式：• 001325 元创股份 (待定)
+                    msg_lines.append(f"• <code>{item['code']}</code> {item['name']} {date_str}")
+                
+                final_text = "\n".join(msg_lines)
+                await safe_reply(update, final_text, parse_mode='HTML')
+            else:
+                await safe_reply(update, "⚠️ 未能抓取到文字详情，请参考上方截图。")
+
         except Exception as e:
-            await safe_reply(update, f"查询失败: {e}")
+            logger.error(f"IPO Error: {e}")
+            await safe_reply(update, f"查询部分失败: {e}")
+        finally:
+            if page: await page.close()
 
 # 日报
 async def get_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -309,28 +355,35 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
     if GLOBAL_VIDEO_PATTERN:
         app_instance.add_handler(MessageHandler(filters.Regex(GLOBAL_VIDEO_PATTERN), lambda u,c: send_global_media(u,c,True)))
 
-# 配置计算器 (接管高级功能)
+# ==============================================================================
+# 修正后的 setup_calculator_bot (替换原来的)
+# ==============================================================================
 def setup_calculator_bot(app_instance: Application) -> None:
     async def start(u, c):
         await safe_reply(u, "👋 我是智能计算器。\n功能：计算、新股、日报、/book、/quote")
     
     app_instance.add_handler(CommandHandler("start", start))
     
-    # AI 功能
+    # AI 功能 (修正了 parse_mode 的位置)
     async def book(u,c): 
-        q = " ".join(c.args); 
-        if not q: return await safe_reply(u, "请加关键词"); 
-        await safe_reply(u, await call_gemini(f"推荐3本关于{q}的书，带理由和摘抄", parse_mode='Markdown'))
+        q = " ".join(c.args)
+        if not q: return await safe_reply(u, "请加关键词")
+        # 修正前: await call_gemini(..., parse_mode='Markdown') -> 报错
+        # 修正后: safe_reply(..., parse_mode='Markdown')
+        ai_text = await call_gemini(f"推荐3本关于{q}的书，带理由和摘抄")
+        await safe_reply(u, ai_text, parse_mode='Markdown')
     
     async def quote(u,c): 
-        q = " ".join(c.args); 
-        t = f"《{q}》" if q else "名著"; 
-        await safe_reply(u, await call_gemini(f"从{t}找一段经典摘抄并赏析", parse_mode='Markdown'))
+        q = " ".join(c.args)
+        t = f"《{q}》" if q else "名著"
+        ai_text = await call_gemini(f"从{t}找一段经典摘抄并赏析")
+        await safe_reply(u, ai_text, parse_mode='Markdown')
     
     async def deep(u,c): 
-        q = " ".join(c.args); 
-        if not q: return await safe_reply(u, "请加话题"); 
-        await safe_reply(u, await call_gemini(f"深度解析话题：{q}", parse_mode='Markdown'))
+        q = " ".join(c.args)
+        if not q: return await safe_reply(u, "请加话题")
+        ai_text = await call_gemini(f"深度解析话题：{q}")
+        await safe_reply(u, ai_text, parse_mode='Markdown')
 
     app_instance.add_handler(CommandHandler("book", book))
     app_instance.add_handler(CommandHandler("quote", quote))
