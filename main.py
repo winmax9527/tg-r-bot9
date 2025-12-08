@@ -8,17 +8,17 @@ import datetime
 from urllib.parse import urlparse
 from typing import List, Dict, Any
 
-import httpx 
+import httpx
+import feedparser
+from simpleeval import simple_eval
 from fastapi import FastAPI, Request, Response
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.error import BadRequest
 from playwright.async_api import async_playwright, Playwright, Browser, TimeoutError as PlaywrightTimeoutError
-from simpleeval import simple_eval
-import feedparser
 
 # ==============================================================================
-# 1. 日志配置
+# 1. 日志与全局配置
 # ==============================================================================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -42,6 +42,7 @@ BOT_ALLOWED_CHATS: Dict[str, List[str]] = {}
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 GLOBAL_HTTP_CLIENT: httpx.AsyncClient | None = None
+BROWSER_LOCK = asyncio.Semaphore(1)
 
 # 🔥 [升级版] RSS 源列表 (涵盖科技、AI、数码、深度)
 DEFAULT_RSS_FEEDS = [
@@ -49,17 +50,15 @@ DEFAULT_RSS_FEEDS = [
     "https://www.cnbeta.com.tw/backend.php", # cnBeta (IT资讯)
     "https://www.ithome.com/rss/",           # IT之家 (数码硬件)
     "https://sspai.com/feed",                # 少数派 (软件/应用)
-    "http://www.zhihudaily.com/#/index",     # 知乎日报 (社会热点，注：需解析器支持，若不支持可换别的)
-    # 你可以自己加喜欢的 RSS，比如 AI 专栏等
+    "http://www.zhihudaily.com/#/index",     # 知乎日报
 ]
 
-BROWSER_LOCK = asyncio.Semaphore(1)
 GLOBAL_IMAGE_MAP: Dict[str, str] = {} 
 GLOBAL_IMAGE_PATTERN: str = "" 
 GLOBAL_VIDEO_MAP: Dict[str, str] = {} 
 GLOBAL_VIDEO_PATTERN: str = "" 
 
-# --- 3. 核心正则 ---
+# --- 3. 核心正则 (严格保留原样) ---
 UNIVERSAL_COMMAND_PATTERN = r"^(地址|安装地址|安装链接|下载地址|下载链接|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接)$"
 ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(提包|安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
 IOS_QUIT_PATTERN = r"^(苹果大退|苹果重启|苹果大退重启|苹果黑屏|苹果重开)$"
@@ -71,9 +70,12 @@ IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
 IPO_COMMAND_PATTERN = r"^(新股|新股申购|新股上市|近期新股|申购|上市)$"
 DIGEST_COMMAND_PATTERN = r"^(日报|简报|新闻|每日简报|科技新闻)$"
 
+# ==============================================================================
+# 4. 辅助函数 (权限、工具、AI调用)
+# ==============================================================================
 
-# --- 辅助函数 ---
 def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
+    """权限检查逻辑"""
     current_app = context.application
     allowed_list: List[str] = []
     for path, app_instance in BOT_APPLICATIONS.items():
@@ -103,8 +105,7 @@ def modify_url_subdomain(url_str: str, new_sub: str) -> str:
         if len(domain_parts) < 2: return url_str
         domain_parts[0] = new_sub
         new_netloc = '.'.join(domain_parts)
-        new_parsed = parsed._replace(netloc=new_netloc)
-        return new_parsed.geturl()
+        return parsed._replace(netloc=new_netloc).geturl()
     except Exception: return url_str
 
 async def safe_reply(update: Update, text: str, parse_mode=None):
@@ -117,7 +118,82 @@ async def safe_reply(update: Update, text: str, parse_mode=None):
             except Exception: pass
     except Exception: pass
 
-# --- Playwright Handlers ---
+async def send_static_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, log_msg: str, html_msg: str):
+    if not update.message or not is_chat_allowed(context, update.message.chat_id): return
+    try: await safe_reply(update, html_msg, parse_mode='HTML')
+    except Exception: pass
+
+# 🔥 核心 AI 调用函数 (Gemini 2.5 Flash)
+async def call_gemini_api(prompt: str, model: str = "gemini-2.5-flash") -> str:
+    MY_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_GEMINI_KEY")
+    if not MY_KEY: return "❌ 未配置 API Key"
+    if not GLOBAL_HTTP_CLIENT: return "❌ HTTP Client 未就绪"
+
+    # 使用 v1beta 接口以支持新模型
+    api_base = "https://generativelanguage.googleapis.com/v1beta"
+    url = f"{api_base}/models/{model}:generateContent?key={MY_KEY}"
+    payload = { "contents": [{ "parts": [{"text": prompt}] }] }
+
+    try:
+        response = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=90.0)
+        if response.status_code == 200:
+            data = response.json()
+            if 'candidates' in data and data['candidates']:
+                return data['candidates'][0]['content']['parts'][0]['text']
+        return f"❌ AI 响应错误 ({response.status_code})"
+    except Exception as e:
+        logger.error(f"Gemini API Error: {e}")
+        return f"❌ 网络请求异常: {str(e)}"
+
+# ==============================================================================
+# 5. AI 文化插件 (/book, /quote, /deep)
+# ==============================================================================
+
+async def handle_book_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not is_chat_allowed(context, update.message.chat_id): return
+    user_input = " ".join(context.args)
+    if not user_input:
+        await safe_reply(update, "📚 **请告诉我您想看什么类型的书？**\n例如：\n<code>/book 科幻小说</code>", parse_mode='HTML')
+        return
+    await safe_reply(update, f"🤔 正在为您检索【{user_input}】相关的书籍...")
+    prompt = f"""你是一位资深图书编辑。用户想找【{user_input}】类型的书。请推荐 3 本高质量书籍。
+    格式要求：
+    📖 **《书名》** (作者)
+    🏷️ 关键词：#标签
+    💡 **推荐理由**：简练介绍。
+    📝 **经典摘抄**：一句原文。"""
+    result = await call_gemini_api(prompt)
+    await safe_reply(update, result, parse_mode='Markdown')
+
+async def handle_novel_quote(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not is_chat_allowed(context, update.message.chat_id): return
+    user_input = " ".join(context.args)
+    target = f"《{user_input}》" if user_input else "世界经典文学名著"
+    await safe_reply(update, "📜 正在翻阅藏书，挑选片段...")
+    prompt = f"""请从{target}中挑选一段经典原文摘抄（100-200字）。
+    然后以文学评论家身份进行【深度赏析】（背景、美感、哲理）。
+    格式：
+    📜 **原文**：“...”
+    ✨ **赏析**：..."""
+    result = await call_gemini_api(prompt)
+    await safe_reply(update, result, parse_mode='Markdown')
+
+async def handle_deep_dive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not is_chat_allowed(context, update.message.chat_id): return
+    user_input = " ".join(context.args)
+    if not user_input:
+        await safe_reply(update, "📰 **请输入您想深入了解的话题**\n例如：<code>/deep Sora模型</code>", parse_mode='HTML')
+        return
+    await safe_reply(update, "🧐 正在进行深度分析...")
+    prompt = f"""用户想深入了解话题：【{user_input}】。请提供一份深度分析报告。
+    包含维度：1.🧐本质是什么(通俗类比) 2.⚖️核心争议/难点 3.🚀未来影响 4.📚延伸阅读"""
+    result = await call_gemini_api(prompt)
+    await safe_reply(update, result, parse_mode='Markdown')
+
+# ==============================================================================
+# 6. 核心业务 Handlers (保留原有的链接获取、指南等)
+# ==============================================================================
+
 async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     bot_id = context.bot_data.get("bot_index", "?")
@@ -201,11 +277,7 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
         await safe_reply(update, msg, parse_mode='HTML')
     except Exception: pass
 
-async def send_static_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, log_msg: str, html_msg: str):
-    if not update.message or not is_chat_allowed(context, update.message.chat_id): return
-    try: await safe_reply(update, html_msg, parse_mode='HTML')
-    except Exception: pass
-
+# --- 静态指南回复 (保留所有文字) ---
 async def send_ios_quit_guide(u, c): await send_static_reply(u, c, "发送苹果大退", "📱 <b>苹果APP大退重新打开步骤</b>\n\n1. 上滑停留调出后台。\n2. 上滑关闭App卡片。\n3. 重新点击图标打开。")
 async def send_android_quit_guide(u, c): await send_static_reply(u, c, "发送安卓大退", "🤖 <b>安卓APP大退重新打开步骤</b>\n\n1. 上滑或点击多任务键进入后台。\n2. 上滑关闭App卡片。\n3. 重新打开App。")
 async def send_android_browser_guide(u, c): await send_static_reply(u, c, "发送安卓浏览器", "🤖 <b>安卓浏览器设置手机版</b>\n\n1. 打开浏览器菜单(≡或⋮)。\n2. 找到“桌面版”或“电脑模式”。\n3. <b>取消勾选</b>它。")
@@ -217,7 +289,7 @@ async def send_global_image(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     keyword = update.message.text
     url = GLOBAL_IMAGE_MAP.get(keyword)
-    if url:
+    if url: 
         try: await update.message.reply_photo(photo=url)
         except Exception: pass
 
@@ -240,8 +312,10 @@ def safe_calculate(expression: str):
         return f"🔢 结果: {result}"
     except Exception: return None
 
+# IPO / Stock Info
 async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BROWSER_INSTANCE
+    if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     if not BROWSER_INSTANCE:
         if hasattr(app.state, 'browser') and app.state.browser: BROWSER_INSTANCE = app.state.browser
         else:
@@ -315,99 +389,62 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if page: await page.close()
             if browser_context: await browser_context.close()
 
-# --- 🔥 [豪华版] 日报生成器 (Gemini 2.5 + 深度总结) ---
-async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 1. 获取 Key
-    MY_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_GEMINI_KEY")
-    if not MY_KEY:
-        await safe_reply(update, "❌ 错误：未配置 GEMINI_API_KEY。")
-        return
+# ==============================================================================
+# 7. 豪华版日报 (RSS + Gemini 2.5)
+# ==============================================================================
 
+async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     await safe_reply(update, "☕️ 正在全网搜集新闻，并召唤 Gemini 2.5 进行深度分析...")
-    
-    # 2. 抓取 RSS (增加抓取数量)
     all_entries = []
     try:
-        # 使用 asyncio 并发抓取，速度更快
         tasks = [asyncio.to_thread(feedparser.parse, url) for url in DEFAULT_RSS_FEEDS]
         feeds = await asyncio.gather(*tasks)
-        
         for feed in feeds:
-            if feed.entries:
-                # 🔥 修改点：每个源抓取前 5 条 (之前是2条)
-                # 这样总素材量会达到 20-30 条，足够 AI 筛选
-                all_entries.extend(feed.entries[:5]) 
+            if feed.entries: all_entries.extend(feed.entries[:5]) 
     except Exception: pass
 
     if not all_entries:
         await safe_reply(update, "📭 尴尬，今日全网暂无更新。")
         return
 
-    # 3. 准备提示词 (由 AI 担任主编进行筛选和润色)
-    # 我们把所有标题扔给 AI，让它自己决定哪些重要
     news_content = ""
-    for entry in all_entries: # 不再切片限制，把抓到的全给 AI
+    for entry in all_entries:
         title = entry.get('title', '无标题').replace("\n", " ")
         link = entry.get('link', '')
         news_content += f"- {title} ({link})\n"
 
-    # 🔥 升级版提示词：要求分类、筛选、扩充
-    prompt_text = f"""
-你是一名资深的科技新闻主编。请根据以下抓取到的 RSS 新闻流，为我撰写一份高质量的《今日科技内参》。
+    prompt_text = f"""你是一名资深的科技新闻主编。请根据以下素材，撰写一份《今日科技内参》。
+要求：
+1. 筛选 8-12 条最有价值的新闻。
+2. 分类：🤖AI前沿、📱数码硬件、🚀商业业界、💡深度有趣。
+3. 深度概括：每条新闻用中文进行 1-2 句解读。
+4. 格式美观，带Emoji和链接。
+素材流：\n{news_content}"""
 
-【要求】：
-1. **筛选去重**：从素材中挑选出 8-12 条最有价值、最重大的新闻，去除广告和琐碎内容。
-2. **分类整理**：请按以下板块分类展示：
-   - 🤖 **AI & 前沿科技** (大模型、黑科技)
-   - 📱 **数码 & 硬件** (手机、显卡、新设备)
-   - 🚀 **商业 & 业界** (大公司动态、收购、政策)
-   - 💡 **有趣 & 深度** (值得一读的文章或新奇事)
-3. **深度概括**：不要只罗列标题！请用中文对每条新闻进行 1-2 句的简要解读，说明它的影响或看点。
-4. **格式美观**：使用 Emoji 点缀，链接请直接附在标题后。
-
-【素材流】：
-{news_content}
-"""
-
-    # 4. 调用 Gemini 2.5 Flash
-    api_base = "https://generativelanguage.googleapis.com/v1beta"
-    model_name = "gemini-2.5-flash" 
-
-    if not GLOBAL_HTTP_CLIENT: 
-        await safe_reply(update, "❌ HTTP Client 未就绪")
-        return
-
-    url = f"{api_base}/models/{model_name}:generateContent?key={MY_KEY}"
-    payload = { "contents": [{ "parts": [{"text": prompt_text}] }] }
+    result = await call_gemini_api(prompt_text, model="gemini-2.5-flash")
     
-    try:
-        response = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=90.0) # 延长超时到90秒，因为内容多了
-        
-        if response.status_code == 200:
-            data = response.json()
-            if 'candidates' in data and data['candidates']:
-                content = data['candidates'][0]['content']['parts'][0]['text']
-                
-                # 加上日期头
-                today = datetime.datetime.now().strftime("%Y-%m-%d")
-                final_msg = f"📅 <b>今日科技内参</b> ({today})\nFrom: Gemini 2.5 Flash\n\n{content}"
-                
-                await safe_reply(update, final_msg, parse_mode='HTML')
-            else:
-                await safe_reply(update, "❌ AI 居然没吐出内容，可能是被安全策略拦截了。")
-        else:
-            await safe_reply(update, f"❌ 生成失败 ({response.status_code}):\n{response.text[:200]}")
+    if "❌" in result and len(result) < 50:
+        await safe_reply(update, result)
+    else:
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        final_msg = f"📅 <b>今日科技内参</b> ({today})\nFrom: Gemini 2.5 Flash\n\n{result}"
+        await safe_reply(update, final_msg, parse_mode='HTML')
 
-    except Exception as e:
-        await safe_reply(update, f"❌ 网络请求异常: {e}")
-        
+# ==============================================================================
+# 8. Bot Setup & Startup
+# ==============================================================================
+
 def setup_calculator_bot(app_instance: Application) -> None:
     async def calc_start(update, context):
-        await safe_reply(update, "👋 我是智能计算器。\n\n1️⃣ 发送算式\n2️⃣ 发送 <b>新股</b>\n3️⃣ 发送 <b>日报</b>", parse_mode='HTML')
+        await safe_reply(update, "👋 我是智能计算器。\n\n1️⃣ 发送算式\n2️⃣ 发送 <b>新股</b>\n3️⃣ 发送 <b>日报</b>\n4️⃣ 试用 /book, /quote, /deep", parse_mode='HTML')
     async def calc_handle_message(update, context):
         if not update.message or not update.message.text: return
         user_text = update.message.text.strip()
         if user_text.startswith("/start"): return
+        # 如果是命令，跳过计算逻辑
+        if user_text.startswith("/"): return
+        
         final_expression = user_text
         if update.message.reply_to_message and update.message.reply_to_message.text:
             if re.match(r'^[\+\-\*\/\^]', user_text):
@@ -421,12 +458,24 @@ def setup_calculator_bot(app_instance: Application) -> None:
         if result: await safe_reply(update, result)
 
     app_instance.add_handler(CommandHandler("start", calc_start))
+    # ✅ 注册 AI 功能到计算器
+    app_instance.add_handler(CommandHandler("book", handle_book_recommend))
+    app_instance.add_handler(CommandHandler("quote", handle_novel_quote))
+    app_instance.add_handler(CommandHandler("deep", handle_deep_dive))
+    # 注册日报和新股
     app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(IPO_COMMAND_PATTERN), get_stock_ipo_info))
     app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(DIGEST_COMMAND_PATTERN), handle_daily_digest))
     app_instance.add_handler(MessageHandler(filters.TEXT, calc_handle_message))
 
 def setup_bot(app_instance: Application, bot_index: int) -> None:
     token_end = app_instance.bot.token[-4:]
+    
+    # ✅ 注册 AI 文化插件 (新功能)
+    app_instance.add_handler(CommandHandler("book", handle_book_recommend))
+    app_instance.add_handler(CommandHandler("quote", handle_novel_quote))
+    app_instance.add_handler(CommandHandler("deep", handle_deep_dive))
+    
+    # 注册原始正则 Handlers (保留原功能)
     app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(UNIVERSAL_COMMAND_PATTERN), get_universal_link))
     app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(ANDROID_SPECIFIC_COMMAND_PATTERN), get_android_specific_link))
     app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(IOS_QUIT_PATTERN), send_ios_quit_guide))
@@ -435,11 +484,13 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
     app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(IOS_BROWSER_PATTERN), send_ios_browser_guide))
     app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(ANDROID_TAB_LIMIT_PATTERN), send_android_tab_limit_guide))
     app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(IOS_TAB_LIMIT_PATTERN), send_ios_tab_limit_guide))
+    
     if GLOBAL_IMAGE_PATTERN: app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(GLOBAL_IMAGE_PATTERN), send_global_image))
     if GLOBAL_VIDEO_PATTERN: app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(GLOBAL_VIDEO_PATTERN), send_global_video))
+    
     async def start_command(update, context):
         if not update.message or not is_chat_allowed(context, update.message.chat_id): return
-        await safe_reply(update, f"🤖 Bot #{bot_index} ({token_end}) 就绪。", parse_mode='HTML')
+        await safe_reply(update, f"🤖 Bot #{bot_index} ({token_end}) 就绪。\n试试 /book, /quote, /deep", parse_mode='HTML')
     app_instance.add_handler(CommandHandler("start", start_command))
 
 # --- FastAPI & Startup ---
@@ -512,7 +563,10 @@ async def startup_event():
             s_cids, s_times, s_msg = os.getenv(f"BOT_{i}_SCHEDULE_CHAT_ID"), os.getenv(f"BOT_{i}_SCHEDULE_TIMES_UTC"), os.getenv(f"BOT_{i}_SCHEDULE_MESSAGE")
             if s_cids and s_times and s_msg:
                 BOT_SCHEDULES[path] = {"chat_ids": [c.strip() for c in s_cids.split(',')], "times": [t.strip() for t in s_times.split(',')], "message": s_msg, "last_sent": None}
-            logger.info(f"Bot #{i} ({token[-4:]}) 加载完成")
+            # Start polling for simplicity on Render
+            await application.start()
+            await application.updater.start_polling()
+            logger.info(f"Bot #{i} ({token[-4:]}) Polling Started")
 
     calc_token = os.getenv("CALC_BOT_TOKEN")
     if calc_token:
@@ -520,8 +574,10 @@ async def startup_event():
             calc_app = Application.builder().token(calc_token).build()
             await calc_app.initialize()
             setup_calculator_bot(calc_app)
+            await calc_app.start()
+            await calc_app.updater.start_polling()
             BOT_APPLICATIONS["calc_bot_webhook"] = calc_app
-            logger.info(f"🧮 计算器 Bot ({calc_token[-4:]}) 加载完成")
+            logger.info(f"🧮 计算器 Bot ({calc_token[-4:]}) Polling Started")
         except Exception as e: logger.error(f"❌ 计算器 Bot 启动失败: {e}")
     else: logger.info("⚠️ 未检测到 CALC_BOT_TOKEN，计算器 Bot 跳过启动。")
 
@@ -538,9 +594,13 @@ async def shutdown_event():
     if GLOBAL_HTTP_CLIENT: await GLOBAL_HTTP_CLIENT.aclose()
     if BROWSER_INSTANCE: await BROWSER_INSTANCE.close()
     if PLAYWRIGHT_INSTANCE: await PLAYWRIGHT_INSTANCE.stop()
+    for app_inst in BOT_APPLICATIONS.values():
+        await app_inst.stop()
+        await app_inst.shutdown()
 
 @app.post("/{webhook_path}")
 async def handle_webhook(webhook_path: str, request: Request):
+    # Render 上我们主要用 Polling，保留 Webhook 接口以防万一
     if webhook_path not in BOT_APPLICATIONS: return Response(status_code=404)
     try:
         update = Update.de_json(await request.json(), BOT_APPLICATIONS[webhook_path].bot)
