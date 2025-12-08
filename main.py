@@ -312,11 +312,10 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if browser_context: await browser_context.close()
 
 # --- 🔥 [关键修改] 侦探版原生 HTTP 日报生成器 ---
-# --- 🔥 [关键修改] 侦探版原生 HTTP 日报生成器 ---
+# --- 🔥 [最终修正版] 强制使用官方直连地址 ---
 async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 1. 获取 Key
-    MY_KEY = os.getenv("GEMINI_API_KEY") # 优先读标准Key
-    if not MY_KEY: MY_KEY = os.getenv("GOOGLE_GEMINI_KEY") # 兼容旧Key
+    # 1. 获取 Key (只读 Key，不读 Base URL)
+    MY_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_GEMINI_KEY")
     
     if not MY_KEY:
         await safe_reply(update, "❌ 错误：未配置 GEMINI_API_KEY。")
@@ -343,15 +342,10 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
         link = entry.get('link', '')
         prompt_text += f"标题：{title}\n链接：{link}\n---\n"
 
-    # 4. 🔥【修复版】读取环境变量中的 API Base
-    # 默认使用官方 v1beta
-    api_base = os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta")
-    
-    # URL 清洗：去掉末尾的 / 和 /models，确保拼接正确
-    if api_base.endswith("/"): api_base = api_base[:-1]
-    if api_base.endswith("/models"): api_base = api_base[:-7]
+    # 4. 🔥【核心修改】完全忽略环境变量，强制使用官方 v1beta 地址
+    # 因为您在新加坡，直连是最稳的，防止环境变量写错
+    api_base = "https://generativelanguage.googleapis.com/v1beta"
 
-    # 定义模型列表 (去掉了不稳定的 latest)
     candidate_models = [
         "gemini-1.5-flash",        # 首选
         "gemini-1.5-pro",          # 次选
@@ -367,14 +361,17 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # 开始轮询
     for model_name in candidate_models:
-        # ✅ 动态拼接 URL，不再写死
+        # 拼接最终 URL
         url = f"{api_base}/models/{model_name}:generateContent?key={MY_KEY}"
         
         # 构造请求体
         payload = { "contents": [{ "parts": [{"text": prompt_text}] }] }
         
         try:
-            # logger.info(f"Trying URL: {url.replace(MY_KEY, '***')}") # 调试用，平时注释掉
+            # 打印正在尝试的 URL (隐藏 Key)，方便在 Render 日志里排查
+            debug_url = url.replace(MY_KEY, "******")
+            logger.info(f"🔗 Trying Google API: {debug_url}")
+
             response = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=60.0)
             
             if response.status_code == 200:
@@ -384,19 +381,23 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
                     logger.info(f"✅ Success with model: {model_name}")
                     break 
             else:
-                last_error = f"Model {model_name} failed: {response.status_code} - {response.text[:100]}"
+                # 详细打印 Google 返回的错误信息
+                error_detail = response.text
+                last_error = f"Model {model_name} failed: {response.status_code} - {error_detail}"
                 logger.warning(last_error)
                 
         except Exception as e:
             last_error = str(e)
+            logger.error(f"❌ Exception: {e}")
             continue 
 
     # 5. 发送结果
     if success_content:
         await safe_reply(update, f"📅 <b>今日 AI 简报</b>\n\n{success_content}", parse_mode='HTML')
     else:
-        await safe_reply(update, f"❌ 所有模型均尝试失败。\n最后报错: {last_error}")
-
+        # 如果失败，把详细错误发出来
+        await safe_reply(update, f"❌ 所有模型均尝试失败。\n错误详情: {last_error[:200]}...")
+        
 
 def setup_calculator_bot(app_instance: Application) -> None:
     async def calc_start(update, context):
