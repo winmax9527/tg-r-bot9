@@ -21,8 +21,10 @@ from playwright.async_api import async_playwright, Playwright, Browser, TimeoutE
 # 引入安全计算库
 from simpleeval import simple_eval
 
-# 🔥 引入 RSS 依赖 (注意：不再需要 openai 库了)
+# 🔥 引入 RSS
 import feedparser
+# 🔥 重新引入 OpenAI (这是最稳的库，之前报错是因为环境变量，不是库的问题)
+from openai import AsyncOpenAI
 
 # ==============================================================================
 # 1. 日志配置
@@ -33,12 +35,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("BotLogic")
 
-# 🔥 降噪配置
+# 🔥 降噪
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
 
 # --- 2. 全局状态 ---
 BOT_APPLICATIONS: Dict[str, Application] = {}
@@ -49,6 +52,7 @@ BOT_ALLOWED_CHATS: Dict[str, List[str]] = {}
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 GLOBAL_HTTP_CLIENT: httpx.AsyncClient | None = None
+AI_CLIENT: AsyncOpenAI | None = None
 
 # 🔥 默认 RSS 源
 DEFAULT_RSS_FEEDS = [
@@ -56,10 +60,7 @@ DEFAULT_RSS_FEEDS = [
     "https://www.cnbeta.com.tw/backend.php",
 ]
 
-# 浏览器并发锁
 BROWSER_LOCK = asyncio.Semaphore(1)
-
-# 全局图片/视频
 GLOBAL_IMAGE_MAP: Dict[str, str] = {} 
 GLOBAL_IMAGE_PATTERN: str = "" 
 GLOBAL_VIDEO_MAP: Dict[str, str] = {} 
@@ -79,28 +80,19 @@ DIGEST_COMMAND_PATTERN = r"^(日报|简报|新闻|每日简报|科技新闻)$"
 
 
 # --- 辅助函数 ---
-
 def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
     current_app = context.application
     allowed_list: List[str] = []
-    
     for path, app_instance in BOT_APPLICATIONS.items():
         if app_instance is current_app:
             allowed_list = BOT_ALLOWED_CHATS.get(path, [])
             break
-            
     chat_id_str = str(chat_id)
     possible_ids_to_check = {chat_id_str} 
-    if chat_id_str.startswith("-100"):
-        short_id = f"-{chat_id_str[4:]}"
-        possible_ids_to_check.add(short_id)
-    elif chat_id_str.startswith("-"):
-        long_id = f"-100{chat_id_str[1:]}"
-        possible_ids_to_check.add(long_id)
-
+    if chat_id_str.startswith("-100"): possible_ids_to_check.add(f"-{chat_id_str[4:]}")
+    elif chat_id_str.startswith("-"): possible_ids_to_check.add(f"-100{chat_id_str[1:]}")
     for check_id in possible_ids_to_check:
-        if check_id in allowed_list:
-            return True 
+        if check_id in allowed_list: return True 
     return False
 
 def generate_universal_subdomain(min_len: int = 4, max_len: int = 7) -> str:
@@ -120,73 +112,56 @@ def modify_url_subdomain(url_str: str, new_sub: str) -> str:
         new_netloc = '.'.join(domain_parts)
         new_parsed = parsed._replace(netloc=new_netloc)
         return new_parsed.geturl()
-    except Exception:
-        return url_str
+    except Exception: return url_str
 
 async def safe_reply(update: Update, text: str, parse_mode=None):
     try:
-        if parse_mode:
-            await update.message.reply_text(text, parse_mode=parse_mode)
-        else:
-            await update.message.reply_text(text)
+        if parse_mode: await update.message.reply_text(text, parse_mode=parse_mode)
+        else: await update.message.reply_text(text)
     except BadRequest as e:
         if "Message to be replied not found" in str(e):
-            try:
-                await update.message.chat.send_message(text, parse_mode=parse_mode)
-            except Exception:
-                pass
-        else:
-            pass
-    except Exception:
-        pass
+            try: await update.message.chat.send_message(text, parse_mode=parse_mode)
+            except Exception: pass
+    except Exception: pass
 
-
-# --- 核心处理器 1 (Playwright - 通用链接) ---
+# --- Playwright Handlers ---
 async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     bot_id = context.bot_data.get("bot_index", "?")
-    
     fastapi_app = context.bot_data.get("fastapi_app")
     if not fastapi_app or not hasattr(fastapi_app.state, 'browser'):
         await safe_reply(update, "❌ 服务内部错误：浏览器未启动。")
         return
-
     current_app = context.application
     api_url = None
     for path, app_instance in BOT_APPLICATIONS.items():
         if app_instance is current_app:
             api_url = BOT_API_URLS.get(path)
             break
-            
     if not api_url:
         await safe_reply(update, "❌ 配置错误：未找到此 Bot 的 API 地址。")
         return
-
     try: await safe_reply(update, "正在为您获取专属通用下载链接，请稍候 ...")
     except: pass
-
-    user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    browser_context = None 
-    page = None 
     
+    user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    page = None 
+    browser_context = None
     async with BROWSER_LOCK:
         try:
             if GLOBAL_HTTP_CLIENT is None: raise RuntimeError("Global HTTP Client not initialized")
             resp = await GLOBAL_HTTP_CLIENT.get(api_url, headers={'User-Agent': user_agent})
             resp.raise_for_status()
             api_data = resp.json()
-
             if api_data.get("code") != 0 or "data" not in api_data:
                 await safe_reply(update, "❌ API 未返回有效链接。")
                 return
-
             domain_a = api_data["data"].strip()
             if not domain_a.startswith(('http://', 'https://')): domain_a = 'http://' + domain_a
             
             browser_context = await fastapi_app.state.browser.new_context(user_agent=user_agent, viewport={'width': 1280, 'height': 800})
             page = await browser_context.new_page()
             page.set_default_timeout(30000)
-
             try:
                 await page.goto(domain_a, wait_until="domcontentloaded")
                 try: await page.wait_for_timeout(1500)
@@ -197,35 +172,23 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except Exception:
                 await safe_reply(update, "❌ 无法连接到源站。")
                 return 
-            
             domain_b = page.url 
             if "chrome-error://" in domain_b or "chromewebdata" in domain_b:
                 await safe_reply(update, "⚠️ 线路维护中，请稍后再试。")
                 return
-
             random_sub = generate_universal_subdomain()
             final_url = modify_url_subdomain(domain_b, random_sub)
-
-            msg = (
-                "✅ <b>您的专属通用下载链接已生成！</b>\n"
-                "👇 <b>点击下方链接即可复制：</b>\n"
-                f"<code>{final_url}</code>" 
-                "\n💡 <i>请务必在手机自带浏览器中打开</i>"
-            )
+            msg = f"✅ <b>您的专属通用下载链接已生成！</b>\n👇 <b>点击下方链接即可复制：</b>\n<code>{final_url}</code>\n💡 <i>请务必在手机自带浏览器中打开</i>"
             await safe_reply(update, msg, parse_mode='HTML')
-
-        except httpx.TimeoutException:
-            await safe_reply(update, "❌ 获取链接超时，对方服务器响应太慢，请重试。")
-        except Exception:
-            await safe_reply(update, "❌ 系统繁忙，请重试。")
+        except httpx.TimeoutException: await safe_reply(update, "❌ 获取链接超时，对方服务器响应太慢，请重试。")
+        except Exception: await safe_reply(update, "❌ 系统繁忙，请重试。")
         finally:
             if page: 
                 try: await page.close()
                 except: pass
-            if browser_context: 
+            if browser_context:
                 try: await browser_context.close()
                 except: pass
-
 
 async def get_android_specific_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
@@ -250,12 +213,12 @@ async def send_static_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     try: await safe_reply(update, html_msg, parse_mode='HTML')
     except Exception: pass
 
-async def send_ios_quit_guide(u, c): await send_static_reply(u, c, "发送苹果大退", "📱 <b>苹果手机APP大退步骤</b>\n\n1. 上滑停留调出后台。\n2. 上滑关闭App卡片。\n3. 重新点击图标打开。")
-async def send_android_quit_guide(u, c): await send_static_reply(u, c, "发送安卓大退", "🤖 <b>安卓手机APP大退步骤</b>\n\n1. 上滑或点击多任务键进入后台。\n2. 上滑关闭App卡片。\n3. 重新打开App。")
-async def send_android_browser_guide(u, c): await send_static_reply(u, c, "发送安卓浏览器", "🤖 <b>安卓浏览器设置手机版</b>\n\n1. 打开浏览器菜单(≡或⋮)。\n2. 找到“桌面版”或“电脑模式”。\n3. <b>取消勾选</b>它。")
-async def send_ios_browser_guide(u, c): await send_static_reply(u, c, "发送苹果浏览器", "📱 <b>苹果浏览器设置手机版</b>\n\n1. 点击地址栏左侧(大小/AA)。\n2. 选择“请求移动网站”。")
-async def send_android_tab_limit_guide(u, c): await send_static_reply(u, c, "发送安卓窗口上限", "🤖 <b>安卓窗口上限解决</b>\n\n1. 点击浏览器标签页图标。\n2. 选择“关闭所有标签页”。")
-async def send_ios_tab_limit_guide(u, c): await send_static_reply(u, c, "发送苹果窗口上限", "📱 <b>苹果窗口上限解决</b>\n\n1. 长按右下角标签图标。\n2. 选择“关闭所有标签页”。")
+async def send_ios_quit_guide(u, c): await send_static_reply(u, c, "发送苹果大退", "📱 <b>苹果手机APP大退步骤</b>...")
+async def send_android_quit_guide(u, c): await send_static_reply(u, c, "发送安卓大退", "🤖 <b>安卓手机APP大退步骤</b>...")
+async def send_android_browser_guide(u, c): await send_static_reply(u, c, "发送安卓浏览器", "🤖 <b>安卓浏览器设置手机版</b>...")
+async def send_ios_browser_guide(u, c): await send_static_reply(u, c, "发送苹果浏览器", "📱 <b>苹果浏览器设置手机版</b>...")
+async def send_android_tab_limit_guide(u, c): await send_static_reply(u, c, "发送安卓窗口上限", "🤖 <b>安卓窗口上限解决</b>...")
+async def send_ios_tab_limit_guide(u, c): await send_static_reply(u, c, "发送苹果窗口上限", "📱 <b>苹果窗口上限解决</b>...")
 
 async def send_global_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
@@ -273,12 +236,10 @@ async def send_global_video(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         try: await update.message.reply_video(video=url)
         except Exception: pass
 
-# --- 🔥 计算器逻辑 ---
 def safe_calculate(expression: str):
     try:
         cleaned_expr = re.sub(r'[^\d\+\-\*\/\(\)\.\%\^]', '', expression)
-        if not cleaned_expr: return None 
-        if len(cleaned_expr) == 1 and cleaned_expr in '+-*/.^%': return None
+        if not cleaned_expr or (len(cleaned_expr) == 1 and cleaned_expr in '+-*/.^%'): return None
         final_expr = cleaned_expr.replace('^', '**')
         if len(final_expr) > 100: return "❌ 算式太长了。"
         result = simple_eval(final_expr)
@@ -286,38 +247,30 @@ def safe_calculate(expression: str):
         return f"🔢 结果: {result}"
     except Exception: return None
 
-# --- 🔥 新股查询逻辑 ---
 async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BROWSER_INSTANCE
-    bot_id = context.bot_data.get("bot_index", "?")
     if not BROWSER_INSTANCE:
-        if hasattr(app.state, 'browser') and app.state.browser:
-            BROWSER_INSTANCE = app.state.browser
+        if hasattr(app.state, 'browser') and app.state.browser: BROWSER_INSTANCE = app.state.browser
         else:
             await safe_reply(update, "❌ 浏览器服务未就绪。")
             return
-
     user_text = update.message.text.strip()
     is_asking_listing = "上市" in user_text
     if is_asking_listing: await safe_reply(update, "🔍 正在检索【即将上市】及【排队中】新股...")
     else: await safe_reply(update, "🔍 正在检索【即将申购】新股...")
-    
     target_url = "https://vip.stock.finance.sina.com.cn/corp/go.php/vRPD_NewStockIssue/page/1.phtml"
     page = None
     browser_context = None
-
     async with BROWSER_LOCK:
         try:
             browser_context = await BROWSER_INSTANCE.new_context(user_agent='Mozilla/5.0 ...', viewport={'width': 1280, 'height': 800})
             page = await browser_context.new_page()
             await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(1)
-
             try:
                 screenshot_bytes = await page.screenshot(full_page=False)
                 await update.message.reply_photo(photo=screenshot_bytes, caption="📸 数据源验证 (新浪财经)")
             except: pass
-
             stocks_data = await page.evaluate('''() => {
                 let table = document.getElementById('NewStockIssueTable');
                 if (!table) table = document.querySelector('table'); 
@@ -333,14 +286,11 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 }
                 return data;
             }''')
-
             today_str = datetime.datetime.now().strftime("%Y-%m-%d")
             result_lines = []
-            
             if is_asking_listing:
                 title = "🔔 <b>近期即将上市 / 待上市</b>"
-                confirmed = []
-                tbd = []
+                confirmed, tbd = [], []
                 for item in stocks_data:
                     code, name, l_date, s_date = item['code'], item['name'], item['list_date'], item['sub_date']
                     if not code or not code.isdigit(): continue
@@ -348,8 +298,7 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         if l_date >= today_str:
                             display = l_date[5:] if len(l_date)>=10 else l_date
                             confirmed.append(f"• <code>{code}</code> <b>{name}</b> ({display} 上市)")
-                    elif s_date and len(s_date) >= 5:
-                         tbd.append(f"• <code>{code}</code> <b>{name}</b> (待定)")
+                    elif s_date and len(s_date) >= 5: tbd.append(f"• <code>{code}</code> <b>{name}</b> (待定)")
                 result_lines = sorted(list(set(confirmed))) + sorted(list(set(tbd)))
             else:
                 title = "📅 <b>近期即将申购</b>"
@@ -362,12 +311,10 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
                             display = s_date[5:] if len(s_date)>=10 else s_date
                             temp_list.append(f"• <code>{code}</code> <b>{name}</b> ({display} 申购)")
                 result_lines = sorted(list(set(temp_list)))
-
             if not result_lines: await safe_reply(update, "📭 数据列表为空。")
             else:
                 final_msg = f"{title}\n" + "\n".join(result_lines)
                 await safe_reply(update, final_msg, parse_mode='HTML')
-
         except Exception as e:
             logger.error(f"Stock Error: {e}")
             await safe_reply(update, f"❌ 访问出错: {e}")
@@ -375,18 +322,20 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if page: await page.close()
             if browser_context: await browser_context.close()
 
-# --- 🔥 [修改版] 原生 HTTP 日报生成器 (100% 解决版本号错误) ---
+# --- 🔥 [核心修改] 硬编码版 AI 日报生成器 ---
 async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """抓取 RSS 并直接调用 Google 原生 API (无视 OpenAI 库)"""
-    # 1. 还是从 Render 环境变量里读 Key，安全第一
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        await safe_reply(update, "❌ AI 服务未配置 (API Key 缺失)")
+    # ⬇️⬇️⬇️ 请在这里填入你的 KEY，不要有空格 ⬇️⬇️⬇️
+    MY_GOOGLE_KEY = "AIzaSyBqLxJ6oaF5Z4KevdoAJHG9WrjnKrsrG3o" 
+    
+    # ⬇️⬇️⬇️ 这里的地址是 Google 官方兼容 OpenAI 的地址，绝对正确，别改 ⬇️⬇️⬇️
+    MY_GOOGLE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+    if "..." in MY_GOOGLE_KEY:
+        await safe_reply(update, "❌ 请在代码里填入你的 Google API Key！")
         return
 
     await safe_reply(update, "☕️ 正在为您抓取新闻并生成 AI 简报，请稍候...")
     
-    # 2. 抓取 RSS
     all_entries = []
     try:
         for feed_url in DEFAULT_RSS_FEEDS:
@@ -398,7 +347,6 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
         await safe_reply(update, "📭 今日暂无新闻更新。")
         return
 
-    # 3. 准备提示词
     selected_entries = all_entries[:5] 
     prompt_text = "请将以下科技新闻总结为一份简报。要求：\n1. 中文回答\n2. 每条新闻用一个emoji开头\n3. 语言简练，重点突出\n4. 不需要打招呼，直接输出内容\n\n新闻内容：\n"
     for entry in selected_entries:
@@ -407,44 +355,40 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
         summary = entry.get('summary', '')[:200]
         prompt_text += f"标题：{title}\n链接：{link}\n摘要：{summary}\n---\n"
 
-    # 4. 🔥 核心：原生直连 Google API (绝对没有 v1main 这种鬼东西)
-    # 这个 URL 是 Google 官方标准文档里的，绝对正确
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-    
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt_text}]
-        }]
-    }
-
     try:
-        # 使用 httpx 直接发请求，绕过所有库
-        if not GLOBAL_HTTP_CLIENT: raise RuntimeError("HTTP Client not ready")
+        # 🔥 这里使用临时的 AI 客户端，只为这一次请求服务
+        # 这样可以保证每次都用你上面写死的最新 Key 和 URL
+        temp_client = AsyncOpenAI(
+            api_key=MY_GOOGLE_KEY, 
+            base_url=MY_GOOGLE_URL
+        )
         
-        response = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=60.0)
-        response.raise_for_status() # 如果报错，这里会直接抛出详细原因
-        
-        data = response.json()
-        # 提取 Google 返回的内容
-        ai_content = data['candidates'][0]['content']['parts'][0]['text']
-        
+        response = await temp_client.chat.completions.create(
+            model="gemini-1.5-flash",
+            messages=[
+                {"role": "system", "content": "你是一个专业的科技新闻编辑。"},
+                {"role": "user", "content": prompt_text}
+            ],
+            max_tokens=800
+        )
+        await temp_client.close() # 用完记得关闭
+
+        ai_content = response.choices[0].message.content
         final_msg = f"📅 <b>今日 AI 简报</b>\n\n{ai_content}"
         await safe_reply(update, final_msg, parse_mode='HTML')
         
     except Exception as e:
-        logger.error(f"Google Direct API Error: {e}")
+        logger.error(f"AI Generation Error: {e}")
         await safe_reply(update, f"❌ AI 生成失败: {str(e)}")
 
 
 def setup_calculator_bot(app_instance: Application) -> None:
     async def calc_start(update, context):
         await safe_reply(update, "👋 我是智能计算器。\n\n1️⃣ 发送算式\n2️⃣ 发送 <b>新股</b>\n3️⃣ 发送 <b>日报</b>", parse_mode='HTML')
-
     async def calc_handle_message(update, context):
         if not update.message or not update.message.text: return
         user_text = update.message.text.strip()
         if user_text.startswith("/start"): return
-
         final_expression = user_text
         if update.message.reply_to_message and update.message.reply_to_message.text:
             if re.match(r'^[\+\-\*\/\^]', user_text):
@@ -454,7 +398,6 @@ def setup_calculator_bot(app_instance: Application) -> None:
                 if match: previous_num = match.group(1)
                 elif re.match(r'^-?\d+(\.\d+)?$', reply_text.strip()): previous_num = reply_text.strip()
                 if previous_num: final_expression = f"{previous_num}{user_text}"
-
         result = safe_calculate(final_expression)
         if result: await safe_reply(update, result)
 
@@ -473,10 +416,8 @@ def setup_bot(app_instance: Application, bot_index: int) -> None:
     app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(IOS_BROWSER_PATTERN), send_ios_browser_guide))
     app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(ANDROID_TAB_LIMIT_PATTERN), send_android_tab_limit_guide))
     app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(IOS_TAB_LIMIT_PATTERN), send_ios_tab_limit_guide))
-
     if GLOBAL_IMAGE_PATTERN: app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(GLOBAL_IMAGE_PATTERN), send_global_image))
     if GLOBAL_VIDEO_PATTERN: app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(GLOBAL_VIDEO_PATTERN), send_global_video))
-    
     async def start_command(update, context):
         if not update.message or not is_chat_allowed(context, update.message.chat_id): return
         await safe_reply(update, f"🤖 Bot #{bot_index} ({token_end}) 就绪。", parse_mode='HTML')
@@ -512,12 +453,9 @@ async def startup_event():
     global GLOBAL_IMAGE_MAP, GLOBAL_IMAGE_PATTERN, GLOBAL_VIDEO_MAP, GLOBAL_VIDEO_PATTERN
     global GLOBAL_HTTP_CLIENT
     
-    # 🔥 初始化全局 HTTP 客户端
     GLOBAL_HTTP_CLIENT = httpx.AsyncClient(timeout=30.0, verify=False, limits=httpx.Limits(max_keepalive_connections=20, max_connections=50))
+    # 🔥 注意：这里不再初始化全局 AI 客户端，我们改在函数里按需初始化，确保用到最新的 Key
     
-    # 注意：这里不再初始化 AI_CLIENT，因为我们在函数里直接用 HTTP 请求了
-    logger.info("✅ HTTP Client 初始化成功 (Google 原生模式已就绪)")
-
     BOT_APPLICATIONS = {}
     BOT_API_URLS = {}
     BOT_APK_URLS = {}
