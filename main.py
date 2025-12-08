@@ -418,92 +418,111 @@ def setup_calculator_bot(app_instance: Application) -> None:
 
     app_instance.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, calc))
 
-# ==============================================================================
-# 7. 启动 (修正版：防止 Token 重复导致的互踢冲突)
-# ==============================================================================
-app = FastAPI()
-
 @app.on_event("startup")
 async def startup_event():
     global GLOBAL_HTTP_CLIENT, PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
     
     # 1. 初始化基础组件
     GLOBAL_HTTP_CLIENT = httpx.AsyncClient(timeout=30.0, verify=False)
+    
+    # --- 浏览器启动 (增加了失败重试，防止 Render 启动慢导致崩盘) ---
     try:
+        logger.info("🚀 Starting Playwright...")
         PLAYWRIGHT_INSTANCE = await async_playwright().start()
         BROWSER_INSTANCE = await PLAYWRIGHT_INSTANCE.chromium.launch(
             headless=True, 
-            args=["--no-sandbox", "--disable-gpu"]
+            args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"] # 增加内存优化参数
         )
         app.state.browser = BROWSER_INSTANCE
         logger.info("✅ System Ready: Playwright Started")
     except Exception as e: 
-        logger.error(f"System Start Error: {e}")
+        logger.error(f"❌ System Start Error (Playwright): {e}")
 
     # 2. 加载全局资源 (图片/视频)
     global GLOBAL_IMAGE_MAP, GLOBAL_IMAGE_PATTERN, GLOBAL_VIDEO_MAP, GLOBAL_VIDEO_PATTERN
     for i in range(1, 11):
-        k, v = os.getenv(f"IMAGE_{i}_KEYS"), os.getenv(f"IMAGE_{i}_URL")
+        # 🔥 修改点：增加 strip() 防止空格
+        k = os.getenv(f"IMAGE_{i}_KEYS", "").strip()
+        v = os.getenv(f"IMAGE_{i}_URL", "").strip()
         if k and v: 
             for key in k.split(','): GLOBAL_IMAGE_MAP[key.strip()] = v
-        k, v = os.getenv(f"VIDEO_{i}_KEYS"), os.getenv(f"VIDEO_{i}_URL")
+            
+        k = os.getenv(f"VIDEO_{i}_KEYS", "").strip()
+        v = os.getenv(f"VIDEO_{i}_URL", "").strip()
         if k and v: 
             for key in k.split(','): GLOBAL_VIDEO_MAP[key.strip()] = v
             
     if GLOBAL_IMAGE_MAP: GLOBAL_IMAGE_PATTERN = r"^(" + "|".join([re.escape(k) for k in GLOBAL_IMAGE_MAP.keys()]) + r")$"
     if GLOBAL_VIDEO_MAP: GLOBAL_VIDEO_PATTERN = r"^(" + "|".join([re.escape(k) for k in GLOBAL_VIDEO_MAP.keys()]) + r")$"
 
-    # 🔥🔥🔥 3. 核心修正：Token 去重池 🔥🔥🔥
-    # 记录已经启动过的 Token，防止同一个 Token 启动两次导致 Conflict
+    # 🔥🔥🔥 3. 核心修正：Token 去重 + 强制清洗 🔥🔥🔥
     active_tokens = set()
 
     # --- 启动工兵 1-10 ---
     for i in range(1, 10):
-        token = os.getenv(f"BOT_TOKEN_{i}")
+        raw_token = os.getenv(f"BOT_TOKEN_{i}")
         
-        if token:
-            # 🛑 检查：Token 是否已存在？
+        if raw_token:
+            # 🔥 强制去掉空格，解决 "Invalid Token" 问题
+            token = raw_token.strip() 
+            
+            # 调试日志：让你知道程序到底读到了啥
+            if len(token) < 10:
+                logger.warning(f"⚠️ Bot {i} Token 看起来太短了，可能配置错误。")
+                continue
+                
             if token in active_tokens:
                 logger.warning(f"⚠️ 跳过 Bot {i}: Token 已经被其他 Bot 使用了！(防止冲突)")
                 continue
             
-            # ✅ 启动 Bot
-            bot = Application.builder().token(token).build()
-            bot.bot_data["fastapi_app"] = app
-            bot.bot_data["bot_index"] = i
-            await bot.initialize()
-            setup_worker_bot(bot, i) # 工兵配置
-            
-            path = f"bot{i}_webhook"
-            BOT_APPLICATIONS[path] = bot
-            
-            # 读取其他配置
-            if url := os.getenv(f"BOT_{i}_API_URL"): BOT_API_URLS[path] = url
-            if url := os.getenv(f"BOT_{i}_APK_URL"): BOT_APK_URLS[path] = url
-            if al := os.getenv(f"BOT_{i}_ALLOWED_CHAT_IDS"): BOT_ALLOWED_CHATS[path] = [c.strip() for c in al.split(',')]
-            
-            await bot.start()
-            await bot.updater.start_polling(drop_pending_updates=True) # 🔥 加这个参数减少启动时的旧消息堆积
-            logger.info(f"Worker {i} Started")
-            
-            # 📝 记录这个 Token 已使用
-            active_tokens.add(token)
+            try:
+                # ✅ 启动 Bot
+                bot = Application.builder().token(token).build()
+                bot.bot_data["fastapi_app"] = app
+                bot.bot_data["bot_index"] = i
+                await bot.initialize()
+                setup_worker_bot(bot, i) 
+                
+                path = f"bot{i}_webhook"
+                BOT_APPLICATIONS[path] = bot
+                
+                # 读取其他配置 (同样加 strip)
+                if url := os.getenv(f"BOT_{i}_API_URL", "").strip(): BOT_API_URLS[path] = url
+                if url := os.getenv(f"BOT_{i}_APK_URL", "").strip(): BOT_APK_URLS[path] = url
+                if al := os.getenv(f"BOT_{i}_ALLOWED_CHAT_IDS", "").strip(): 
+                    BOT_ALLOWED_CHATS[path] = [c.strip() for c in al.split(',')]
+                
+                await bot.start()
+                await bot.updater.start_polling(drop_pending_updates=True)
+                logger.info(f"✅ Worker {i} Started (Token ends with {token[-4:]})")
+                
+                active_tokens.add(token)
+            except Exception as e:
+                logger.error(f"❌ Worker {i} 启动失败: {e}")
 
     # --- 启动计算器 ---
-    calc_token = os.getenv("CALC_BOT_TOKEN")
-    if calc_token:
-        # 🛑 检查：Token 是否已存在？
+    raw_calc_token = os.getenv("CALC_BOT_TOKEN")
+    
+    if raw_calc_token:
+        # 🔥 强制去掉空格
+        calc_token = raw_calc_token.strip()
+        
         if calc_token in active_tokens:
-             logger.warning("⚠️ 跳过计算器 Bot: Token 已经被工兵 Bot 使用了！(防止冲突)")
+             logger.warning("⚠️ 跳过计算器 Bot: Token 已经被工兵 Bot 使用了！")
         else:
-            c_bot = Application.builder().token(calc_token).build()
-            await c_bot.initialize()
-            setup_calculator_bot(c_bot) # 计算器配置
-            await c_bot.start()
-            await c_bot.updater.start_polling(drop_pending_updates=True)
-            BOT_APPLICATIONS["calc"] = c_bot
-            logger.info("Calc Bot Started")
-            active_tokens.add(calc_token)
+            try:
+                c_bot = Application.builder().token(calc_token).build()
+                await c_bot.initialize()
+                setup_calculator_bot(c_bot)
+                await c_bot.start()
+                await c_bot.updater.start_polling(drop_pending_updates=True)
+                BOT_APPLICATIONS["calc"] = c_bot
+                logger.info(f"✅ Calc Bot Started (Token ends with {calc_token[-4:]})")
+                active_tokens.add(calc_token)
+            except Exception as e:
+                logger.error(f"❌ Calc Bot 启动失败: {e}")
+    else:
+        logger.info("ℹ️ 未检测到 CALC_BOT_TOKEN，计算器未启动。")
             
 @app.on_event("shutdown")
 async def shutdown():
