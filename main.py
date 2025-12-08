@@ -5,7 +5,7 @@ import re
 import random
 import string
 import datetime
-from datetime import date, datetime # 🔥 新增：用于日期比对
+from datetime import date, datetime
 from urllib.parse import urlparse
 from typing import List, Dict, Any
 
@@ -20,7 +20,7 @@ from telegram.error import BadRequest
 from playwright.async_api import async_playwright, Playwright, Browser, TimeoutError as PlaywrightTimeoutError
 
 # ==============================================================================
-# 1. 日志配置 (保留详细记录)
+# 1. 日志配置
 # ==============================================================================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -28,7 +28,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("BotLogic")
 
-# 只屏蔽底层噪音，保留业务日志
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
@@ -46,7 +45,7 @@ BROWSER_INSTANCE: Browser | None = None
 GLOBAL_HTTP_CLIENT: httpx.AsyncClient | None = None
 BROWSER_LOCK = asyncio.Semaphore(1)
 
-# RSS 源 (日报用)
+# RSS 源
 DEFAULT_RSS_FEEDS = [
     "https://36kr.com/feed",
     "https://www.cnbeta.com.tw/backend.php",
@@ -64,7 +63,6 @@ ANDROID_BROWSER_PATTERN = r"^(安卓浏览器手机版|安卓桌面版|安卓浏
 IOS_BROWSER_PATTERN = r"^(苹果浏览器手机版|苹果浏览器|苹果桌面版)$"
 ANDROID_TAB_LIMIT_PATTERN = r"^(安卓窗口上限|窗口上限|标签上限)$"
 IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
-# 新增正则 (给计算器用)
 IPO_COMMAND_PATTERN = r"^(新股|新股申购|新股上市|近期新股|申购|上市)$"
 DIGEST_COMMAND_PATTERN = r"^(日报|简报|新闻|每日简报|科技新闻)$"
 
@@ -93,7 +91,6 @@ def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
         if cid in allowed_list: return True
     return False
 
-# 🔥 日志记录器
 def log_user_action(update: Update, bot_name: str, action: str):
     if not update.effective_user: return
     user = update.effective_user
@@ -111,7 +108,7 @@ async def safe_reply(update: Update, text: str, parse_mode=None):
     except Exception: pass
 
 # ==============================================================================
-# 4. 🔥 原汁原味的工兵逻辑 (保留所有文字和跳转)
+# 4. 工兵逻辑
 # ==============================================================================
 
 def generate_universal_subdomain(min_len: int = 4, max_len: int = 7) -> str:
@@ -132,7 +129,6 @@ def modify_url_subdomain(url_str: str, new_sub: str) -> str:
         return parsed._replace(netloc=new_netloc).geturl()
     except Exception: return url_str
 
-# 核心链接逻辑 (API -> Playwright -> B域名)
 async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     bot_id = context.bot_data.get("bot_index", "?")
@@ -162,17 +158,14 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             domain_a = api_data.get("data", "").strip()
             if not domain_a.startswith(('http://', 'https://')): domain_a = 'http://' + domain_a
             
-            # 使用浏览器跳转
             context_p = await context.bot_data["fastapi_app"].state.browser.new_context(user_agent=user_agent)
             page = await context_p.new_page()
             
-            # 🔥 修正点 1：将 wait_until 改为 'networkidle'
             try:
                 await page.goto(domain_a, wait_until="networkidle", timeout=25000)
             except Exception:
                 pass
 
-            # 🔥 修正点 2：增加硬等待时间
             try: await page.wait_for_timeout(3000)
             except: pass
             
@@ -207,7 +200,6 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
         await safe_reply(update, msg, parse_mode='HTML')
     except Exception: pass
 
-# 静态回复 (Wrapper)
 async def send_static_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, html_msg: str):
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     await safe_reply(update, html_msg, parse_mode='HTML')
@@ -223,7 +215,7 @@ async def send_global_media(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         except: pass
 
 # ==============================================================================
-# 5. 🔥 计算器/AI 逻辑 (独立封装，互不干扰)
+# 5. 🔥 计算器/AI 逻辑
 # ==============================================================================
 
 async def call_gemini(prompt: str, model: str = "gemini-2.5-flash") -> str:
@@ -238,9 +230,7 @@ async def call_gemini(prompt: str, model: str = "gemini-2.5-flash") -> str:
         return f"AI Error: {resp.status_code}"
     except Exception as e: return f"Net Error: {e}"
 
-# ==============================================================================
-# 修正后的 get_ipo_info (日期过滤 + 保留表头)
-# ==============================================================================
+# 新股逻辑
 async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(update, "CalcBot", "IPO Query")
     if not BROWSER_INSTANCE: return await safe_reply(update, "❌ 浏览器未就绪")
@@ -251,30 +241,26 @@ async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         page = None
         try:
             page = await BROWSER_INSTANCE.new_page()
-            # 1. 打开页面
             await page.goto("https://vip.stock.finance.sina.com.cn/corp/go.php/vRPD_NewStockIssue/page/1.phtml", timeout=30000)
             
             try:
                 await page.wait_for_selector("#NewStockTable", state="visible", timeout=10000)
             except: pass 
 
-            # 2. 📝 抓取文字
             rows_data = await page.evaluate('''() => {
-                // 跳过前2行表头，抓取接下来的 30 行，因为我们要过滤掉历史数据
                 const rows = Array.from(document.querySelectorAll('#NewStockTable tr')).slice(2); 
                 return rows.slice(0, 30).map(tr => {
                     const tds = tr.querySelectorAll('td');
                     if (tds.length < 5) return null; 
                     return {
-                        code: tds[0].innerText.trim(),      // 证券代码
-                        name: tds[2].innerText.trim(),      // 证券简称
-                        sub_date: tds[3].innerText.trim(),  // 申购日
-                        list_date: tds[4].innerText.trim()  // 上市日
+                        code: tds[0].innerText.trim(),
+                        name: tds[2].innerText.trim(),
+                        sub_date: tds[3].innerText.trim(),
+                        list_date: tds[4].innerText.trim()
                     };
                 }).filter(item => item !== null);
             }''')
 
-            # 3. 📅 核心逻辑：日期过滤
             valid_rows = []
             today = date.today()
 
@@ -282,39 +268,26 @@ async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for item in rows_data:
                     l_str = item['list_date']
                     keep = False
-                    
                     if l_str == "-" or not l_str:
-                        # 如果没有上市日期，说明还没上市，保留
                         keep = True
                     else:
                         try:
-                            # 字符串转日期
                             l_date = datetime.strptime(l_str, "%Y-%m-%d").date()
-                            # 只有 >= 今天 才保留
                             if l_date >= today:
                                 keep = True
                         except:
                             keep = True
-                            
                     if keep:
                         valid_rows.append(item)
-
-                # 只取前 15 条
                 valid_rows = valid_rows[:15]
 
-            # 4. 格式化输出
             if valid_rows:
-                # 🔔 标题
                 msg_lines = ["🔔 <b>近期新股日历 (从今日起)</b>"]
-                
-                # 🔥 你要求的保留表头
                 msg_lines.append("• 证券代码 证券简称 申购日 / 上市日") 
                 
                 for item in valid_rows:
                     l_date = item['list_date'] if item['list_date'] else "-"
                     s_date = item['sub_date'] if item['sub_date'] else "-"
-                    
-                    # 格式：• 688805 健信超导 2025-12-15 / -
                     line = f"• <code>{item['code']}</code> {item['name']} {s_date} / {l_date}"
                     msg_lines.append(line)
                 
@@ -329,7 +302,7 @@ async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             if page: await page.close()
 
-# 日报
+# 日报逻辑
 async def get_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(update, "CalcBot", "Daily Digest")
     await safe_reply(update, "☕️ 正在搜集新闻并生成简报...")
@@ -357,23 +330,18 @@ def do_calc(text):
     except: return None
 
 # ==============================================================================
-# 6. Bot Setup (两个配置函数)
+# 6. Bot Setup
 # ==============================================================================
 
-# 配置工兵 (只做原来的事，文案一个字不少)
 def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
     token_end = app_instance.bot.token[-4:]
-    
     async def start(u, c):
         await safe_reply(u, f"🤖 工兵 #{bot_index} ({token_end}) 就绪。")
 
     app_instance.add_handler(CommandHandler("start", start))
-    
-    # 链接
     app_instance.add_handler(MessageHandler(filters.Regex(UNIVERSAL_COMMAND_PATTERN), get_universal_link))
     app_instance.add_handler(MessageHandler(filters.Regex(ANDROID_SPECIFIC_COMMAND_PATTERN), get_android_specific_link))
 
-    # 教程 (全文本恢复)
     t_ios_quit = "📱 <b>苹果手机APP大退步骤</b>\n\n1. 上滑停留调出后台。\n2. 上滑关闭App卡片。\n3. 重新点击图标打开。"
     t_and_quit = "🤖 <b>安卓手机APP大退步骤</b>\n\n1. 上滑或点击多任务键进入后台。\n2. 上滑关闭App卡片。\n3. 重新打开App。"
     t_and_browser = "🤖 <b>安卓浏览器设置手机版</b>\n\n1. 打开浏览器菜单(≡或⋮)。\n2. 找到“桌面版”或“电脑模式”。\n3. <b>取消勾选</b>它。"
@@ -393,31 +361,31 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
     if GLOBAL_VIDEO_PATTERN:
         app_instance.add_handler(MessageHandler(filters.Regex(GLOBAL_VIDEO_PATTERN), lambda u,c: send_global_media(u,c,True)))
 
-# ==============================================================================
-# 修正后的 setup_calculator_bot (替换原来的)
-# ==============================================================================
+# 🔥🔥🔥 重点修改：增加了提示语 🔥🔥🔥
 def setup_calculator_bot(app_instance: Application) -> None:
     async def start(u, c):
         await safe_reply(u, "👋 我是智能计算器。\n功能：计算、新股、日报、/book、/quote")
     
     app_instance.add_handler(CommandHandler("start", start))
     
-    # AI 功能 (修正了 parse_mode 的位置)
     async def book(u,c): 
         q = " ".join(c.args)
         if not q: return await safe_reply(u, "请加关键词")
+        await safe_reply(u, "📚 正在为您寻找好书，请稍候...") # ✅ 新增提示
         ai_text = await call_gemini(f"推荐3本关于{q}的书，带理由和摘抄")
         await safe_reply(u, ai_text, parse_mode='Markdown')
     
     async def quote(u,c): 
         q = " ".join(c.args)
         t = f"《{q}》" if q else "名著"
+        await safe_reply(u, "📜 正在翻阅名著摘录金句，请稍候...") # ✅ 新增提示
         ai_text = await call_gemini(f"从{t}找一段经典摘抄并赏析")
         await safe_reply(u, ai_text, parse_mode='Markdown')
     
     async def deep(u,c): 
         q = " ".join(c.args)
         if not q: return await safe_reply(u, "请加话题")
+        await safe_reply(u, "🧠 正在深度思考，请稍候...") # ✅ 新增提示
         ai_text = await call_gemini(f"深度解析话题：{q}")
         await safe_reply(u, ai_text, parse_mode='Markdown')
 
@@ -425,11 +393,9 @@ def setup_calculator_bot(app_instance: Application) -> None:
     app_instance.add_handler(CommandHandler("quote", quote))
     app_instance.add_handler(CommandHandler("deep", deep))
 
-    # 新股 & 日报 (优先匹配)
     app_instance.add_handler(MessageHandler(filters.Regex(IPO_COMMAND_PATTERN), get_ipo_info))
     app_instance.add_handler(MessageHandler(filters.Regex(DIGEST_COMMAND_PATTERN), get_daily_digest))
 
-    # 计算器 (兜底)
     async def calc(u,c):
         if not u.message.text or u.message.text.startswith("/"): return
         res = do_calc(u.message.text)
@@ -440,7 +406,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
     app_instance.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, calc))
 
 # ==============================================================================
-# 7. 启动 (请确保这一行 app = FastAPI() 在 @app.on_event 之前！！！)
+# 7. 启动
 # ==============================================================================
 app = FastAPI()
 
@@ -451,23 +417,21 @@ async def startup_event():
     # 1. 初始化基础组件
     GLOBAL_HTTP_CLIENT = httpx.AsyncClient(timeout=30.0, verify=False)
     
-    # --- 浏览器启动 (增加了失败重试，防止 Render 启动慢导致崩盘) ---
     try:
         logger.info("🚀 Starting Playwright...")
         PLAYWRIGHT_INSTANCE = await async_playwright().start()
         BROWSER_INSTANCE = await PLAYWRIGHT_INSTANCE.chromium.launch(
             headless=True, 
-            args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"] # 增加内存优化参数
+            args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
         )
         app.state.browser = BROWSER_INSTANCE
         logger.info("✅ System Ready: Playwright Started")
     except Exception as e: 
         logger.error(f"❌ System Start Error (Playwright): {e}")
 
-    # 2. 加载全局资源 (图片/视频)
+    # 2. 加载全局资源
     global GLOBAL_IMAGE_MAP, GLOBAL_IMAGE_PATTERN, GLOBAL_VIDEO_MAP, GLOBAL_VIDEO_PATTERN
     for i in range(1, 11):
-        # 🔥 修改点：增加 strip() 防止空格
         k = os.getenv(f"IMAGE_{i}_KEYS", "").strip()
         v = os.getenv(f"IMAGE_{i}_URL", "").strip()
         if k and v: 
@@ -481,18 +445,15 @@ async def startup_event():
     if GLOBAL_IMAGE_MAP: GLOBAL_IMAGE_PATTERN = r"^(" + "|".join([re.escape(k) for k in GLOBAL_IMAGE_MAP.keys()]) + r")$"
     if GLOBAL_VIDEO_MAP: GLOBAL_VIDEO_PATTERN = r"^(" + "|".join([re.escape(k) for k in GLOBAL_VIDEO_MAP.keys()]) + r")$"
 
-    # 🔥🔥🔥 3. 核心修正：Token 去重 + 强制清洗 🔥🔥🔥
+    # 3. 启动 Bot
     active_tokens = set()
 
-    # --- 启动工兵 1-10 ---
+    # --- 工兵 ---
     for i in range(1, 10):
         raw_token = os.getenv(f"BOT_TOKEN_{i}")
         
         if raw_token:
-            # 🔥 强制去掉空格，解决 "Invalid Token" 问题
             token = raw_token.strip() 
-            
-            # 调试日志：让你知道程序到底读到了啥
             if len(token) < 10:
                 logger.warning(f"⚠️ Bot {i} Token 看起来太短了，可能配置错误。")
                 continue
@@ -502,7 +463,6 @@ async def startup_event():
                 continue
             
             try:
-                # ✅ 启动 Bot
                 bot = Application.builder().token(token).build()
                 bot.bot_data["fastapi_app"] = app
                 bot.bot_data["bot_index"] = i
@@ -512,7 +472,6 @@ async def startup_event():
                 path = f"bot{i}_webhook"
                 BOT_APPLICATIONS[path] = bot
                 
-                # 读取其他配置 (同样加 strip)
                 if url := os.getenv(f"BOT_{i}_API_URL", "").strip(): BOT_API_URLS[path] = url
                 if url := os.getenv(f"BOT_{i}_APK_URL", "").strip(): BOT_APK_URLS[path] = url
                 if al := os.getenv(f"BOT_{i}_ALLOWED_CHAT_IDS", "").strip(): 
@@ -526,11 +485,10 @@ async def startup_event():
             except Exception as e:
                 logger.error(f"❌ Worker {i} 启动失败: {e}")
 
-    # --- 启动计算器 ---
+    # --- 计算器 ---
     raw_calc_token = os.getenv("CALC_BOT_TOKEN")
     
     if raw_calc_token:
-        # 🔥 强制去掉空格
         calc_token = raw_calc_token.strip()
         
         if calc_token in active_tokens:
