@@ -313,20 +313,19 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # --- 🔥 [关键修改] 侦探版原生 HTTP 日报生成器 ---
 async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 1. 从 Render 环境变量获取 Key
+    # 1. 获取 Render 环境变量
     MY_KEY = os.getenv("GOOGLE_GEMINI_KEY")
 
     if not MY_KEY:
-        await safe_reply(update, "❌ 错误：请在 Render 后台配置 GOOGLE_GEMINI_KEY 变量。")
+        await safe_reply(update, "❌ 错误：请在 Render 后台 Environment 页面配置 GOOGLE_GEMINI_KEY。")
         return
 
-    await safe_reply(update, "☕️ 正在为您抓取新闻并生成 AI 简报，请稍候...")
+    await safe_reply(update, "☕️ 正在为您抓取新闻并生成 AI 简报 (Gemini 1.5 Flash)...")
     
-    # 2. 抓取 RSS (带简单的防卡死处理)
+    # 2. 抓取 RSS
     all_entries = []
     try:
         for feed_url in DEFAULT_RSS_FEEDS:
-            # 这里的 feedparser 建议放进线程池，防止阻塞
             feed = await asyncio.to_thread(feedparser.parse, feed_url)
             if feed.entries: all_entries.extend(feed.entries[:2])
     except Exception: pass
@@ -335,15 +334,16 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
         await safe_reply(update, "📭 今日暂无新闻更新。")
         return
 
-    # 3. 准备提示词
+    # 3. 提示词
     prompt_text = "请将以下科技新闻总结为一份简报。要求：\n1. 中文回答\n2. 每条新闻用一个emoji开头\n3. 语言简练\n\n内容：\n"
     for entry in all_entries[:5]:
         title = entry.get('title', '无标题')
         link = entry.get('link', '')
         prompt_text += f"标题：{title}\n链接：{link}\n---\n"
 
-    # 4. 🔥【稳妥方案】使用 v1 接口 + gemini-pro 模型 (这个组合极少报错)
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={MY_KEY}"
+    # 4. 🔥【核心修复】强制使用 v1beta 和 gemini-1.5-flash
+    # 这是 Google 目前唯一对所有免费 Key 开放且稳定的接口
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={MY_KEY}"
     
     payload = {
         "contents": [{
@@ -354,12 +354,15 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         if not GLOBAL_HTTP_CLIENT: raise RuntimeError("HTTP Client not ready")
         
+        # 发送请求
         response = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=60.0)
         
+        # 错误处理
         if response.status_code != 200:
-            await safe_reply(update, f"❌ Google 报错 ({response.status_code}):\n{response.text[:200]}")
+            await safe_reply(update, f"❌ Google 报错 ({response.status_code}):\n{response.text[:300]}")
             return
 
+        # 解析数据
         data = response.json()
         ai_content = data['candidates'][0]['content']['parts'][0]['text']
         
