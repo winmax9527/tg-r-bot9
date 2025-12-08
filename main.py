@@ -8,22 +8,14 @@ import datetime
 from urllib.parse import urlparse
 from typing import List, Dict, Any
 
-# 🔥 核心依赖
 import httpx 
 from fastapi import FastAPI, Request, Response
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.error import BadRequest
-
-# 引入 Playwright
 from playwright.async_api import async_playwright, Playwright, Browser, TimeoutError as PlaywrightTimeoutError
-
-# 引入安全计算库
 from simpleeval import simple_eval
-
-# 🔥 引入 RSS 和 OpenAI
 import feedparser
-from openai import AsyncOpenAI # 👈 我们重新用回这个库，它是最稳的
 
 # ==============================================================================
 # 1. 日志配置
@@ -40,7 +32,6 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
-logging.getLogger("openai").setLevel(logging.WARNING)
 
 # --- 2. 全局状态 ---
 BOT_APPLICATIONS: Dict[str, Application] = {}
@@ -51,7 +42,6 @@ BOT_ALLOWED_CHATS: Dict[str, List[str]] = {}
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 GLOBAL_HTTP_CLIENT: httpx.AsyncClient | None = None
-AI_CLIENT: AsyncOpenAI | None = None
 
 # 🔥 默认 RSS 源
 DEFAULT_RSS_FEEDS = [
@@ -212,12 +202,12 @@ async def send_static_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     try: await safe_reply(update, html_msg, parse_mode='HTML')
     except Exception: pass
 
-async def send_ios_quit_guide(u, c): await send_static_reply(u, c, "发送苹果大退", "📱 <b>苹果手机APP大退步骤</b>\n\n1. 上滑停留调出后台。\n2. 上滑关闭App卡片。\n3. 重新点击图标打开。")
-async def send_android_quit_guide(u, c): await send_static_reply(u, c, "发送安卓大退", "🤖 <b>安卓手机APP大退步骤</b>\n\n1. 上滑或点击多任务键进入后台。\n2. 上滑关闭App卡片。\n3. 重新打开App。")
-async def send_android_browser_guide(u, c): await send_static_reply(u, c, "发送安卓浏览器", "🤖 <b>安卓浏览器设置手机版</b>\n\n1. 打开浏览器菜单(≡或⋮)。\n2. 找到“桌面版”或“电脑模式”。\n3. <b>取消勾选</b>它。")
-async def send_ios_browser_guide(u, c): await send_static_reply(u, c, "发送苹果浏览器", "📱 <b>苹果浏览器设置手机版</b>\n\n1. 点击地址栏左侧(大小/AA)。\n2. 选择“请求移动网站”。\n(如果显示“请求桌面网站”则无需操作)")
-async def send_android_tab_limit_guide(u, c): await send_static_reply(u, c, "发送安卓窗口上限", "🤖 <b>安卓窗口上限解决</b>\n\n1. 点击浏览器标签页图标(数字框)。\n2. 选择“关闭所有标签页”或手动关闭旧标签。")
-async def send_ios_tab_limit_guide(u, c): await send_static_reply(u, c, "发送苹果窗口上限", "📱 <b>苹果窗口上限解决</b>\n\n1. 长按右下角标签图标。\n2. 选择“关闭所有标签页”。")
+async def send_ios_quit_guide(u, c): await send_static_reply(u, c, "发送苹果大退", "📱 <b>苹果手机APP大退步骤</b>...")
+async def send_android_quit_guide(u, c): await send_static_reply(u, c, "发送安卓大退", "🤖 <b>安卓手机APP大退步骤</b>...")
+async def send_android_browser_guide(u, c): await send_static_reply(u, c, "发送安卓浏览器", "🤖 <b>安卓浏览器设置手机版</b>...")
+async def send_ios_browser_guide(u, c): await send_static_reply(u, c, "发送苹果浏览器", "📱 <b>苹果浏览器设置手机版</b>...")
+async def send_android_tab_limit_guide(u, c): await send_static_reply(u, c, "发送安卓窗口上限", "🤖 <b>安卓窗口上限解决</b>...")
+async def send_ios_tab_limit_guide(u, c): await send_static_reply(u, c, "发送苹果窗口上限", "📱 <b>苹果窗口上限解决</b>...")
 
 async def send_global_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
@@ -321,19 +311,13 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if page: await page.close()
             if browser_context: await browser_context.close()
 
-# --- 🔥 [终极方案] OpenAI 库 + 硬编码地址 ---
+# --- 🔥 [关键修改] 侦探版原生 HTTP 日报生成器 ---
 async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    终极方案：使用官方 OpenAI 库，但是强制把地址和Key写死在代码里。
-    这能解决 'v1main' 问题 (因为不读环境变量)，也能解决 '404' 问题 (因为 OpenAI 库会自动处理路径)
+    抓取 RSS 并直接调用 Google 原生 API (输出详细错误版)
     """
-    # ⬇️ 你的 Key 已经在这里了，不要动它
+    # ⬇️ 再次确认 Key 无误 ⬇️
     MY_KEY = "AIzaSyBqLxJ6oaF5Z4KevdoAJHG9WrjnKrsrG3o"
-    
-    # ⬇️ 这个地址是 Google 兼容 OpenAI 的官方地址 (结尾必须有 openai/ )
-    # OpenAI 库会自动在后面加 v1/chat/completions，所以这里不需要写 v1beta/openai
-    # 修正：根据 google 文档，Base URL 应该是 https://generativelanguage.googleapis.com/v1beta/openai/
-    MY_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
     await safe_reply(update, "☕️ 正在为您抓取新闻并生成 AI 简报，请稍候...")
     
@@ -358,31 +342,38 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
         summary = entry.get('summary', '')[:200]
         prompt_text += f"标题：{title}\n链接：{link}\n摘要：{summary}\n---\n"
 
-    try:
-        # 🔥🔥🔥 见证奇迹的时刻：不读环境变量，直接在这里写死！
-        client = AsyncOpenAI(
-            api_key=MY_KEY,
-            base_url=MY_BASE_URL
-        )
-        
-        response = await client.chat.completions.create(
-            model="gemini-1.5-flash",
-            messages=[
-                {"role": "system", "content": "你是一个专业的科技新闻编辑。"},
-                {"role": "user", "content": prompt_text}
-            ],
-            max_tokens=800
-        )
-        # 用完关闭
-        await client.close()
+    # 3. 🔥 使用 v1 (稳定版) 而不是 v1beta，看看能不能通过
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={MY_KEY}"
+    
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt_text}]
+        }]
+    }
 
-        ai_content = response.choices[0].message.content
+    try:
+        if not GLOBAL_HTTP_CLIENT: raise RuntimeError("HTTP Client not ready")
+        
+        # 🔥 核心改动：去掉了 response.raise_for_status()，这样就算报错也能往下走
+        response = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=60.0)
+        
+        # 如果不是 200，说明有鬼
+        if response.status_code != 200:
+            error_text = response.text # 🔥 这里藏着真正的凶手！
+            logger.error(f"Google 报错内容: {error_text}")
+            # 直接把错误原文发给你，我们看看 Google 到底说什么
+            await safe_reply(update, f"❌ Google 拒绝访问 (代码 {response.status_code}):\n{error_text[:500]}")
+            return
+
+        data = response.json()
+        ai_content = data['candidates'][0]['content']['parts'][0]['text']
+        
         final_msg = f"📅 <b>今日 AI 简报</b>\n\n{ai_content}"
         await safe_reply(update, final_msg, parse_mode='HTML')
         
     except Exception as e:
-        logger.error(f"Final AI Error: {e}")
-        await safe_reply(update, f"❌ AI 生成失败: {str(e)}")
+        logger.error(f"Google Direct API Error: {e}")
+        await safe_reply(update, f"❌ 连接出错: {str(e)}")
 
 
 def setup_calculator_bot(app_instance: Application) -> None:
@@ -457,8 +448,8 @@ async def startup_event():
     global GLOBAL_HTTP_CLIENT
     
     GLOBAL_HTTP_CLIENT = httpx.AsyncClient(timeout=30.0, verify=False, limits=httpx.Limits(max_keepalive_connections=20, max_connections=50))
-    # 🔥 注意：这里不再初始化全局 AI 客户端，我们改在函数里按需初始化，确保用到最新的 Key
-    
+    logger.info("✅ HTTP Client 初始化成功")
+
     BOT_APPLICATIONS = {}
     BOT_API_URLS = {}
     BOT_APK_URLS = {}
