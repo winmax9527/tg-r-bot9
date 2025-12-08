@@ -193,7 +193,7 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
     try:
         random_sub = generate_android_specific_subdomain()
         final_url = apk_template.replace("*", random_sub, 1)
-        msg = f"✅ <b>安卓专用链接：</b>\n<code>{final_url}</code>"
+        msg = f"✅ <b>您的安卓专用下载链接已生成！</b>\n👇 <b>点击下方链接即可复制：</b>\n<code>{final_url}</code>\n💡 <i>请务必在手机自带浏览器中打开</i>"
         await safe_reply(update, msg, parse_mode='HTML')
     except Exception: pass
 
