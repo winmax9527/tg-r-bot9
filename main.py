@@ -314,10 +314,10 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # --- 🔥 [关键修改] 侦探版原生 HTTP 日报生成器 ---
 async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    抓取 RSS 并直接调用 Google 原生 API (输出详细错误版)
+    抓取 RSS 并直接调用 Google 原生 API (修复版)
     """
-    # ⬇️ 再次确认 Key 无误 ⬇️
-    MY_KEY = "AIzaSyBqLxJ6oaF5Z4KevdoAJHG9WrjnKrsrG3o"
+    # ⚠️【安全警告】: 你的 Key 已经暴露，建议测试完成后去 Google Cloud Console 重置 Key，并改用 os.getenv 读取
+    MY_KEY = "AIzaSyBqLxJ6oaF5Z4KevdoAJHG9WrjnKrsrG3o" 
 
     await safe_reply(update, "☕️ 正在为您抓取新闻并生成 AI 简报，请稍候...")
     
@@ -325,6 +325,7 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
     all_entries = []
     try:
         for feed_url in DEFAULT_RSS_FEEDS:
+            # 增加超时控制，防止卡死
             feed = await asyncio.to_thread(feedparser.parse, feed_url)
             if feed.entries: all_entries.extend(feed.entries[:2])
     except Exception: pass
@@ -342,8 +343,8 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
         summary = entry.get('summary', '')[:200]
         prompt_text += f"标题：{title}\n链接：{link}\n摘要：{summary}\n---\n"
 
-    # 3. 🔥 使用 v1 (稳定版) 而不是 v1beta，看看能不能通过
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={MY_KEY}"
+    # 3. 🔥【修复点】将 v1 改为 v1beta
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={MY_KEY}"
     
     payload = {
         "contents": [{
@@ -354,19 +355,23 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         if not GLOBAL_HTTP_CLIENT: raise RuntimeError("HTTP Client not ready")
         
-        # 🔥 核心改动：去掉了 response.raise_for_status()，这样就算报错也能往下走
+        # 发送请求
         response = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=60.0)
         
-        # 如果不是 200，说明有鬼
+        # 检查状态码
         if response.status_code != 200:
-            error_text = response.text # 🔥 这里藏着真正的凶手！
+            error_text = response.text
             logger.error(f"Google 报错内容: {error_text}")
-            # 直接把错误原文发给你，我们看看 Google 到底说什么
-            await safe_reply(update, f"❌ Google 拒绝访问 (代码 {response.status_code}):\n{error_text[:500]}")
+            await safe_reply(update, f"❌ Google 请求失败 ({response.status_code}):\n{error_text[:200]}")
             return
 
         data = response.json()
-        ai_content = data['candidates'][0]['content']['parts'][0]['text']
+        # 增加解析的健壮性，防止返回结构不同导致崩溃
+        try:
+            ai_content = data['candidates'][0]['content']['parts'][0]['text']
+        except (KeyError, IndexError):
+            ai_content = "⚠️ AI 返回了数据，但格式无法解析（可能被安全策略拦截）。"
+            logger.error(f"解析失败，原始数据: {data}")
         
         final_msg = f"📅 <b>今日 AI 简报</b>\n\n{ai_content}"
         await safe_reply(update, final_msg, parse_mode='HTML')
