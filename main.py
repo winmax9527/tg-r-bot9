@@ -313,19 +313,20 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # --- 🔥 [关键修改] 侦探版原生 HTTP 日报生成器 ---
 async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    抓取 RSS 并直接调用 Google 原生 API (修复版)
-    """
-    # ⚠️【安全警告】: 你的 Key 已经暴露，建议测试完成后去 Google Cloud Console 重置 Key，并改用 os.getenv 读取
-    MY_KEY = "AIzaSyBqLxJ6oaF5Z4KevdoAJHG9WrjnKrsrG3o" 
+    # 1. 从 Render 环境变量获取 Key
+    MY_KEY = os.getenv("GOOGLE_GEMINI_KEY")
+
+    if not MY_KEY:
+        await safe_reply(update, "❌ 错误：请在 Render 后台配置 GOOGLE_GEMINI_KEY 变量。")
+        return
 
     await safe_reply(update, "☕️ 正在为您抓取新闻并生成 AI 简报，请稍候...")
     
-    # 1. 抓取 RSS
+    # 2. 抓取 RSS (带简单的防卡死处理)
     all_entries = []
     try:
         for feed_url in DEFAULT_RSS_FEEDS:
-            # 增加超时控制，防止卡死
+            # 这里的 feedparser 建议放进线程池，防止阻塞
             feed = await asyncio.to_thread(feedparser.parse, feed_url)
             if feed.entries: all_entries.extend(feed.entries[:2])
     except Exception: pass
@@ -334,17 +335,15 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
         await safe_reply(update, "📭 今日暂无新闻更新。")
         return
 
-    # 2. 准备提示词
-    selected_entries = all_entries[:5] 
-    prompt_text = "请将以下科技新闻总结为一份简报。要求：\n1. 中文回答\n2. 每条新闻用一个emoji开头\n3. 语言简练，重点突出\n4. 不需要打招呼，直接输出内容\n\n新闻内容：\n"
-    for entry in selected_entries:
+    # 3. 准备提示词
+    prompt_text = "请将以下科技新闻总结为一份简报。要求：\n1. 中文回答\n2. 每条新闻用一个emoji开头\n3. 语言简练\n\n内容：\n"
+    for entry in all_entries[:5]:
         title = entry.get('title', '无标题')
         link = entry.get('link', '')
-        summary = entry.get('summary', '')[:200]
-        prompt_text += f"标题：{title}\n链接：{link}\n摘要：{summary}\n---\n"
+        prompt_text += f"标题：{title}\n链接：{link}\n---\n"
 
-    # 3. 🔥【修复点】将 v1 改为 v1beta
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={MY_KEY}"
+    # 4. 🔥【稳妥方案】使用 v1 接口 + gemini-pro 模型 (这个组合极少报错)
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={MY_KEY}"
     
     payload = {
         "contents": [{
@@ -355,31 +354,20 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         if not GLOBAL_HTTP_CLIENT: raise RuntimeError("HTTP Client not ready")
         
-        # 发送请求
         response = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=60.0)
         
-        # 检查状态码
         if response.status_code != 200:
-            error_text = response.text
-            logger.error(f"Google 报错内容: {error_text}")
-            await safe_reply(update, f"❌ Google 请求失败 ({response.status_code}):\n{error_text[:200]}")
+            await safe_reply(update, f"❌ Google 报错 ({response.status_code}):\n{response.text[:200]}")
             return
 
         data = response.json()
-        # 增加解析的健壮性，防止返回结构不同导致崩溃
-        try:
-            ai_content = data['candidates'][0]['content']['parts'][0]['text']
-        except (KeyError, IndexError):
-            ai_content = "⚠️ AI 返回了数据，但格式无法解析（可能被安全策略拦截）。"
-            logger.error(f"解析失败，原始数据: {data}")
+        ai_content = data['candidates'][0]['content']['parts'][0]['text']
         
-        final_msg = f"📅 <b>今日 AI 简报</b>\n\n{ai_content}"
-        await safe_reply(update, final_msg, parse_mode='HTML')
+        await safe_reply(update, f"📅 <b>今日 AI 简报</b>\n\n{ai_content}", parse_mode='HTML')
         
     except Exception as e:
-        logger.error(f"Google Direct API Error: {e}")
-        await safe_reply(update, f"❌ 连接出错: {str(e)}")
-
+        logger.error(f"Google API Error: {e}")
+        await safe_reply(update, f"❌ 处理出错: {e}")
 
 def setup_calculator_bot(app_instance: Application) -> None:
     async def calc_start(update, context):
