@@ -510,10 +510,23 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown():
+    # 1. 清理全局资源
     if GLOBAL_HTTP_CLIENT: await GLOBAL_HTTP_CLIENT.aclose()
     if BROWSER_INSTANCE: await BROWSER_INSTANCE.close()
     if PLAYWRIGHT_INSTANCE: await PLAYWRIGHT_INSTANCE.stop()
-    for b in BOT_APPLICATIONS.values(): await b.stop(); await b.shutdown()
 
-@app.get("/")
-async def root(): return {"status": "OK", "bots": len(BOT_APPLICATIONS)}
+    # 2. 优雅关闭所有 Bot
+    for b in BOT_APPLICATIONS.values():
+        try:
+            # 🔥 关键修复：先强制停止轮询，防止 "Updater is still running" 错误
+            if b.updater and b.updater.running:
+                await b.updater.stop()
+            
+            # 然后再停止 App
+            if b.running:
+                await b.stop()
+            
+            # 最后释放资源
+            await b.shutdown()
+        except Exception as e:
+            logger.error(f"Error shutting down bot: {e}")
