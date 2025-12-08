@@ -6,3 +6,5 @@ gunicorn
 httpx
 # 在原有基础上增加
 simpleeval
+openai
+feedparser
