@@ -18,7 +18,7 @@ from telegram.error import BadRequest
 from playwright.async_api import async_playwright, Playwright, Browser, TimeoutError as PlaywrightTimeoutError
 
 # ==============================================================================
-# 1. 详细日志配置
+# 1. 日志配置 (保留详细记录)
 # ==============================================================================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -26,13 +26,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("BotLogic")
 
-# 降噪
+# 只屏蔽底层网络库的刷屏日志，保留业务日志
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # ==============================================================================
-# 2. 全局变量与配置
+# 2. 全局变量
 # ==============================================================================
 BOT_APPLICATIONS: Dict[str, Application] = {}
 BOT_API_URLS: Dict[str, str] = {}
@@ -44,7 +44,7 @@ BROWSER_INSTANCE: Browser | None = None
 GLOBAL_HTTP_CLIENT: httpx.AsyncClient | None = None
 BROWSER_LOCK = asyncio.Semaphore(1)
 
-# RSS 源配置
+# RSS 源
 DEFAULT_RSS_FEEDS = [
     "https://36kr.com/feed",
     "https://www.cnbeta.com.tw/backend.php",
@@ -53,7 +53,7 @@ DEFAULT_RSS_FEEDS = [
     "http://www.zhihudaily.com/#/index",
 ]
 
-# 正则表达式 (保留原样)
+# 正则表达式 (严格保留)
 UNIVERSAL_COMMAND_PATTERN = r"^(地址|安装地址|安装链接|下载地址|下载链接|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接)$"
 ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(提包|安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
 IOS_QUIT_PATTERN = r"^(苹果大退|苹果重启|苹果大退重启|苹果黑屏|苹果重开)$"
@@ -82,12 +82,10 @@ def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
             allowed_list = BOT_ALLOWED_CHATS.get(path, [])
             break
     if not allowed_list: return True 
-    
     chat_id_str = str(chat_id)
     possible_ids = {chat_id_str}
     if chat_id_str.startswith("-100"): possible_ids.add(f"-{chat_id_str[4:]}")
     elif chat_id_str.startswith("-"): possible_ids.add(f"-100{chat_id_str[1:]}")
-    
     for cid in possible_ids:
         if cid in allowed_list: return True
     return False
@@ -114,11 +112,9 @@ async def call_gemini_api(prompt: str, model: str = "gemini-2.5-flash") -> str:
     MY_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_GEMINI_KEY")
     if not MY_KEY: return "❌ 未配置 API Key"
     if not GLOBAL_HTTP_CLIENT: return "❌ HTTP Client 未就绪"
-
     api_base = "https://generativelanguage.googleapis.com/v1beta"
     url = f"{api_base}/models/{model}:generateContent?key={MY_KEY}"
     payload = { "contents": [{ "parts": [{"text": prompt}] }] }
-
     try:
         response = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=90.0)
         if response.status_code == 200:
@@ -134,7 +130,6 @@ async def call_gemini_api(prompt: str, model: str = "gemini-2.5-flash") -> str:
 # 4. 高级功能 (计算器 Bot 独享)
 # ==============================================================================
 
-# --- AI 文化插件 ---
 async def handle_book_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(update, "CalcBot", "Book Recommend")
     user_input = " ".join(context.args)
@@ -166,7 +161,6 @@ async def handle_deep_dive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = await call_gemini_api(prompt)
     await safe_reply(update, result, parse_mode='Markdown')
 
-# --- 豪华日报 ---
 async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(update, "CalcBot", "Daily Digest")
     await safe_reply(update, "☕️ 正在全网搜集新闻，并召唤 Gemini 2.5 分析...")
@@ -196,7 +190,7 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
     final_msg = f"📅 <b>今日科技内参</b> ({today})\nFrom: Gemini 2.5 Flash\n\n{result}"
     await safe_reply(update, final_msg, parse_mode='HTML')
 
-# --- IPO 查询 ---
+# --- IPO 查询 (截图版) ---
 async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(update, "CalcBot", "IPO Query")
     global BROWSER_INSTANCE
@@ -236,7 +230,7 @@ def safe_calculate(expression: str):
     except: return None
 
 # ==============================================================================
-# 5. 基础功能 (工兵 Bot 专用)
+# 5. 基础功能 (工兵 Bot 专用：链接与教程)
 # ==============================================================================
 def modify_url_subdomain(url_str: str, new_sub: str) -> str:
     try:
@@ -248,7 +242,9 @@ def modify_url_subdomain(url_str: str, new_sub: str) -> str:
         return parsed._replace(netloc=new_netloc).geturl()
     except Exception: return url_str
 
+# 🔥 核心：链接获取逻辑 (API -> A -> Playwright跳转 -> B -> 修改二级域名)
 async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     bot_index = context.bot_data.get("bot_index", "?")
     log_user_action(update, f"WorkerBot-{bot_index}", "Get Link")
     
@@ -270,19 +266,29 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
     page = None 
     async with BROWSER_LOCK:
         try:
+            # 1. 从 API 获取入口域名 A
             if GLOBAL_HTTP_CLIENT is None: raise RuntimeError("HTTP Client not init")
             resp = await GLOBAL_HTTP_CLIENT.get(api_url, headers={'User-Agent': user_agent})
             api_data = resp.json()
             domain_a = api_data.get("data", "").strip()
             if not domain_a.startswith(('http://', 'https://')): domain_a = 'http://' + domain_a
             
+            # 2. 使用 Playwright 访问 A，等待跳转到 B
+            # 🔥 这是您强调的“先从api取得 A域名再从指向B”的关键步骤
             context_p = await context.bot_data["fastapi_app"].state.browser.new_context(user_agent=user_agent)
             page = await context_p.new_page()
-            await page.goto(domain_a, wait_until="domcontentloaded", timeout=20000)
-            final_url = page.url
+            await page.goto(domain_a, wait_until="domcontentloaded", timeout=25000)
             
+            # 等待潜在的 JS 跳转
+            try: await page.wait_for_timeout(2000)
+            except: pass
+            
+            # 3. 获取最终域名 B
+            final_url_b = page.url
+            
+            # 4. 修改二级域名 (生成专属链接)
             rand_sub = ''.join(random.choices(string.ascii_lowercase + string.digits, k=5))
-            final_url = modify_url_subdomain(final_url, rand_sub)
+            final_url = modify_url_subdomain(final_url_b, rand_sub)
             
             msg = f"✅ <b>专属链接：</b>\n<code>{final_url}</code>"
             await safe_reply(update, msg, parse_mode='HTML')
@@ -293,36 +299,38 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         finally:
             if page: await page.close()
 
-# 🔥 【修正】这里不再使用 lambda，而是完整的函数，确保文字不丢失
+# 辅助函数：发送静态回复
 async def send_static_reply_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, html_msg: str, action_name: str):
+    if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     bot_index = context.bot_data.get("bot_index", "?")
     log_user_action(update, f"WorkerBot-{bot_index}", action_name)
     await safe_reply(update, html_msg, parse_mode='HTML')
 
 # ==============================================================================
-# 6. Bot Setup (职责划分)
+# 6. Bot Setup (严格职责划分)
 # ==============================================================================
 
-# 🔥 计算器 Bot 配置 (全能王)
+# 🔥 核心：计算器 Bot 配置 (全能王)
 def setup_calculator_bot(app_instance: Application) -> None:
     async def calc_start(update, context):
         log_user_action(update, "CalcBot", "/start")
         await safe_reply(update, "👋 我是智能计算器。\n支持：算式、新股、日报、/book、/quote、/deep")
 
-    # 1. 注册 AI/高级命令
+    # 1. 优先注册命令 Handlers
     app_instance.add_handler(CommandHandler("start", calc_start))
     app_instance.add_handler(CommandHandler("book", handle_book_recommend))
     app_instance.add_handler(CommandHandler("quote", handle_novel_quote))
     app_instance.add_handler(CommandHandler("deep", handle_deep_dive))
 
-    # 2. 注册 Regex (新股、日报)
+    # 2. 注册 Regex Handlers (新股、日报) - 必须在文本计算之前！
     app_instance.add_handler(MessageHandler(filters.Regex(IPO_COMMAND_PATTERN), get_stock_ipo_info))
     app_instance.add_handler(MessageHandler(filters.Regex(DIGEST_COMMAND_PATTERN), handle_daily_digest))
 
-    # 3. 注册 纯文本计算 (兜底)
+    # 3. 最后注册文本计算 (作为兜底)
     async def calc_catch_all(update, context):
         if not update.message or not update.message.text: return
         text = update.message.text.strip()
+        # 如果不是命令，尝试计算
         if not text.startswith("/"):
             res = safe_calculate(text)
             if res:
@@ -331,7 +339,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
 
     app_instance.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, calc_catch_all))
 
-# 🔥 工兵 Bot 配置 (只干苦力，文案全恢复！)
+# 🔥 核心：工兵 Bot 配置 (只干苦力，文案 100% 恢复)
 def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
     token_end = app_instance.bot.token[-4:]
     
@@ -397,7 +405,7 @@ async def startup_event():
             application.bot_data["bot_index"] = i 
             await application.initialize()
             
-            # 🔥 配置工兵逻辑
+            # 🔥 配置工兵逻辑 (链接+教程)
             setup_worker_bot(application, i)
             
             path = f"bot{i}_webhook"
@@ -416,7 +424,7 @@ async def startup_event():
             calc_app = Application.builder().token(calc_token).build()
             await calc_app.initialize()
             
-            # 🔥 配置计算器逻辑
+            # 🔥 配置计算器逻辑 (AI+IPO+计算)
             setup_calculator_bot(calc_app)
             
             await calc_app.start()
