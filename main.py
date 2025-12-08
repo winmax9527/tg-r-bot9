@@ -312,9 +312,9 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if browser_context: await browser_context.close()
 
 # --- 🔥 [关键修改] 侦探版原生 HTTP 日报生成器 ---
-# --- 🔥 [最终修正版] 强制使用官方直连地址 ---
+# --- 🔥 [最终决战版] 切换至 v1 稳定版接口 ---
 async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 1. 获取 Key (只读 Key，不读 Base URL)
+    # 1. 获取 Key
     MY_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_GEMINI_KEY")
     
     if not MY_KEY:
@@ -323,7 +323,7 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await safe_reply(update, "☕️ 正在尝试连接 AI 模型生成简报...")
     
-    # 2. 抓取 RSS
+    # 2. 抓取 RSS (保持不变)
     all_entries = []
     try:
         for feed_url in DEFAULT_RSS_FEEDS:
@@ -335,21 +335,24 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
         await safe_reply(update, "📭 今日暂无新闻更新。")
         return
 
-    # 3. 准备提示词
+    # 3. 准备提示词 (保持不变)
     prompt_text = "请将以下科技新闻总结为一份简报。要求：\n1. 中文回答\n2. 每条新闻用一个emoji开头\n3. 语言简练\n\n内容：\n"
     for entry in all_entries[:5]:
         title = entry.get('title', '无标题')
         link = entry.get('link', '')
         prompt_text += f"标题：{title}\n链接：{link}\n---\n"
 
-    # 4. 🔥【核心修改】完全忽略环境变量，强制使用官方 v1beta 地址
-    # 因为您在新加坡，直连是最稳的，防止环境变量写错
-    api_base = "https://generativelanguage.googleapis.com/v1beta"
+    # 4. 🔥【修改点】使用 v1 稳定版接口 (去掉了 beta)
+    api_base = "https://generativelanguage.googleapis.com/v1"
 
+    # 🔥【修改点】穷举所有可能的模型版本号
+    # Google 有时候别名会失效，直接用具体版本号最稳
     candidate_models = [
-        "gemini-1.5-flash",        # 首选
-        "gemini-1.5-pro",          # 次选
-        "gemini-pro"               # 保底
+        "gemini-1.5-flash-002",    # 最新 Flash
+        "gemini-1.5-flash-001",    # 稳定 Flash
+        "gemini-1.5-flash",        # 通用别名
+        "gemini-1.5-pro-002",      # 最新 Pro
+        "gemini-1.5-pro",          # 通用 Pro
     ]
 
     last_error = ""
@@ -361,17 +364,14 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # 开始轮询
     for model_name in candidate_models:
-        # 拼接最终 URL
+        # 拼接 URL
         url = f"{api_base}/models/{model_name}:generateContent?key={MY_KEY}"
-        
-        # 构造请求体
         payload = { "contents": [{ "parts": [{"text": prompt_text}] }] }
         
         try:
-            # 打印正在尝试的 URL (隐藏 Key)，方便在 Render 日志里排查
-            debug_url = url.replace(MY_KEY, "******")
-            logger.info(f"🔗 Trying Google API: {debug_url}")
-
+            # 日志记录 (方便排查)
+            logger.info(f"🔗 Trying: {url.replace(MY_KEY, '******')}")
+            
             response = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=60.0)
             
             if response.status_code == 200:
@@ -381,22 +381,21 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
                     logger.info(f"✅ Success with model: {model_name}")
                     break 
             else:
-                # 详细打印 Google 返回的错误信息
-                error_detail = response.text
-                last_error = f"Model {model_name} failed: {response.status_code} - {error_detail}"
+                # 记录具体错误
+                err_msg = response.text
+                # 如果是 404，说明模型名不对，继续下一个；如果是 429(限流) 或 500，也继续
+                last_error = f"{model_name} ({response.status_code}): {err_msg[:100]}"
                 logger.warning(last_error)
                 
         except Exception as e:
             last_error = str(e)
-            logger.error(f"❌ Exception: {e}")
             continue 
 
     # 5. 发送结果
     if success_content:
         await safe_reply(update, f"📅 <b>今日 AI 简报</b>\n\n{success_content}", parse_mode='HTML')
     else:
-        # 如果失败，把详细错误发出来
-        await safe_reply(update, f"❌ 所有模型均尝试失败。\n错误详情: {last_error[:200]}...")
+        await safe_reply(update, f"❌ 简报生成失败。\n最后报错: {last_error}")
         
 
 def setup_calculator_bot(app_instance: Application) -> None:
