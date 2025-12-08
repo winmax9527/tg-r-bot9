@@ -43,10 +43,14 @@ PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 GLOBAL_HTTP_CLIENT: httpx.AsyncClient | None = None
 
-# 🔥 默认 RSS 源
+# 🔥 [升级版] RSS 源列表 (涵盖科技、AI、数码、深度)
 DEFAULT_RSS_FEEDS = [
-    "https://36kr.com/feed",
-    "https://www.cnbeta.com.tw/backend.php",
+    "https://36kr.com/feed",                 # 36氪 (商业/创投)
+    "https://www.cnbeta.com.tw/backend.php", # cnBeta (IT资讯)
+    "https://www.ithome.com/rss/",           # IT之家 (数码硬件)
+    "https://sspai.com/feed",                # 少数派 (软件/应用)
+    "http://www.zhihudaily.com/#/index",     # 知乎日报 (社会热点，注：需解析器支持，若不支持可换别的)
+    # 你可以自己加喜欢的 RSS，比如 AI 专栏等
 ]
 
 BROWSER_LOCK = asyncio.Semaphore(1)
@@ -311,7 +315,7 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if page: await page.close()
             if browser_context: await browser_context.close()
 
-# --- 🔥 [最终优化版] 直接调用 Gemini 2.5 Flash ---
+# --- 🔥 [豪华版] 日报生成器 (Gemini 2.5 + 深度总结) ---
 async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 1. 获取 Key
     MY_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_GEMINI_KEY")
@@ -319,29 +323,53 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
         await safe_reply(update, "❌ 错误：未配置 GEMINI_API_KEY。")
         return
 
-    await safe_reply(update, "☕️ 正在连接 Gemini 2.5 生成简报...")
+    await safe_reply(update, "☕️ 正在全网搜集新闻，并召唤 Gemini 2.5 进行深度分析...")
     
-    # 2. 抓取 RSS
+    # 2. 抓取 RSS (增加抓取数量)
     all_entries = []
     try:
-        for feed_url in DEFAULT_RSS_FEEDS:
-            feed = await asyncio.to_thread(feedparser.parse, feed_url)
-            if feed.entries: all_entries.extend(feed.entries[:2])
+        # 使用 asyncio 并发抓取，速度更快
+        tasks = [asyncio.to_thread(feedparser.parse, url) for url in DEFAULT_RSS_FEEDS]
+        feeds = await asyncio.gather(*tasks)
+        
+        for feed in feeds:
+            if feed.entries:
+                # 🔥 修改点：每个源抓取前 5 条 (之前是2条)
+                # 这样总素材量会达到 20-30 条，足够 AI 筛选
+                all_entries.extend(feed.entries[:5]) 
     except Exception: pass
 
     if not all_entries:
-        await safe_reply(update, "📭 今日暂无新闻更新。")
+        await safe_reply(update, "📭 尴尬，今日全网暂无更新。")
         return
 
-    # 3. 提示词
-    prompt_text = "请将以下科技新闻总结为一份简报。要求：\n1. 中文回答\n2. 每条新闻用一个emoji开头\n3. 语言简练\n\n内容：\n"
-    for entry in all_entries[:5]:
-        title = entry.get('title', '无标题')
+    # 3. 准备提示词 (由 AI 担任主编进行筛选和润色)
+    # 我们把所有标题扔给 AI，让它自己决定哪些重要
+    news_content = ""
+    for entry in all_entries: # 不再切片限制，把抓到的全给 AI
+        title = entry.get('title', '无标题').replace("\n", " ")
         link = entry.get('link', '')
-        prompt_text += f"标题：{title}\n链接：{link}\n---\n"
+        news_content += f"- {title} ({link})\n"
 
-    # 4. 🔥【直接指定】使用您账号里存在的 gemini-2.5-flash
-    # 注意：根据您的日志，新模型都在 v1beta 接口
+    # 🔥 升级版提示词：要求分类、筛选、扩充
+    prompt_text = f"""
+你是一名资深的科技新闻主编。请根据以下抓取到的 RSS 新闻流，为我撰写一份高质量的《今日科技内参》。
+
+【要求】：
+1. **筛选去重**：从素材中挑选出 8-12 条最有价值、最重大的新闻，去除广告和琐碎内容。
+2. **分类整理**：请按以下板块分类展示：
+   - 🤖 **AI & 前沿科技** (大模型、黑科技)
+   - 📱 **数码 & 硬件** (手机、显卡、新设备)
+   - 🚀 **商业 & 业界** (大公司动态、收购、政策)
+   - 💡 **有趣 & 深度** (值得一读的文章或新奇事)
+3. **深度概括**：不要只罗列标题！请用中文对每条新闻进行 1-2 句的简要解读，说明它的影响或看点。
+4. **格式美观**：使用 Emoji 点缀，链接请直接附在标题后。
+
+【素材流】：
+{news_content}
+"""
+
+    # 4. 调用 Gemini 2.5 Flash
     api_base = "https://generativelanguage.googleapis.com/v1beta"
     model_name = "gemini-2.5-flash" 
 
@@ -349,21 +377,24 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
         await safe_reply(update, "❌ HTTP Client 未就绪")
         return
 
-    # 拼接 URL
     url = f"{api_base}/models/{model_name}:generateContent?key={MY_KEY}"
     payload = { "contents": [{ "parts": [{"text": prompt_text}] }] }
     
     try:
-        # 发送请求
-        response = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=60.0)
+        response = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=90.0) # 延长超时到90秒，因为内容多了
         
         if response.status_code == 200:
             data = response.json()
             if 'candidates' in data and data['candidates']:
                 content = data['candidates'][0]['content']['parts'][0]['text']
-                await safe_reply(update, f"📅 <b>今日 AI 简报</b>\n(Model: {model_name})\n\n{content}", parse_mode='HTML')
+                
+                # 加上日期头
+                today = datetime.datetime.now().strftime("%Y-%m-%d")
+                final_msg = f"📅 <b>今日科技内参</b> ({today})\nFrom: Gemini 2.5 Flash\n\n{content}"
+                
+                await safe_reply(update, final_msg, parse_mode='HTML')
             else:
-                await safe_reply(update, "❌ AI 返回空内容。")
+                await safe_reply(update, "❌ AI 居然没吐出内容，可能是被安全策略拦截了。")
         else:
             await safe_reply(update, f"❌ 生成失败 ({response.status_code}):\n{response.text[:200]}")
 
