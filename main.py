@@ -311,7 +311,7 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if page: await page.close()
             if browser_context: await browser_context.close()
 
-# --- 🔥 [终极自适应版] 自动发现可用模型 ---
+# --- 🔥 [最终优化版] 直接调用 Gemini 2.5 Flash ---
 async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 1. 获取 Key
     MY_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_GEMINI_KEY")
@@ -319,9 +319,9 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
         await safe_reply(update, "❌ 错误：未配置 GEMINI_API_KEY。")
         return
 
-    await safe_reply(update, "☕️ 正在连接 Google 查询可用模型库...")
-
-    # 2. 抓取 RSS (保持不变)
+    await safe_reply(update, "☕️ 正在连接 Gemini 2.5 生成简报...")
+    
+    # 2. 抓取 RSS
     all_entries = []
     try:
         for feed_url in DEFAULT_RSS_FEEDS:
@@ -333,103 +333,43 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
         await safe_reply(update, "📭 今日暂无新闻更新。")
         return
 
+    # 3. 提示词
     prompt_text = "请将以下科技新闻总结为一份简报。要求：\n1. 中文回答\n2. 每条新闻用一个emoji开头\n3. 语言简练\n\n内容：\n"
     for entry in all_entries[:5]:
         title = entry.get('title', '无标题')
         link = entry.get('link', '')
         prompt_text += f"标题：{title}\n链接：{link}\n---\n"
 
+    # 4. 🔥【直接指定】使用您账号里存在的 gemini-2.5-flash
+    # 注意：根据您的日志，新模型都在 v1beta 接口
+    api_base = "https://generativelanguage.googleapis.com/v1beta"
+    model_name = "gemini-2.5-flash" 
+
     if not GLOBAL_HTTP_CLIENT: 
         await safe_reply(update, "❌ HTTP Client 未就绪")
         return
 
-    # =========================================================
-    # 🔥 核心逻辑：先问 Google "我有什么模型？" (ListModels)
-    # =========================================================
-    found_model_name = None
-    last_error = ""
-
-    # 我们优先尝试 v1beta，因为新模型都在这
-    discovery_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={MY_KEY}"
-    
-    try:
-        logger.info(f"🕵️ 正在执行模型自发现: {discovery_url.replace(MY_KEY, '******')}")
-        list_resp = await GLOBAL_HTTP_CLIENT.get(discovery_url, timeout=30.0)
-        
-        if list_resp.status_code == 200:
-            models_data = list_resp.json()
-            available_models = models_data.get('models', [])
-            
-            # 打印出来看看您的账号到底拥有什么 (会在 Render 日志显示)
-            model_names = [m['name'] for m in available_models]
-            logger.info(f"📋 您的账号可用模型列表: {model_names}")
-            
-            # 智能筛选：找一个支持 generateContent 的模型
-            # 优先找 flash, 然后找 pro, 最后随便找一个 gemini
-            preferred_order = ["flash", "pro", "gemini"]
-            
-            for pref in preferred_order:
-                for m in available_models:
-                    name = m['name'] # 格式通常是 models/gemini-1.5-flash
-                    methods = m.get('supportedGenerationMethods', [])
-                    
-                    if "generateContent" in methods and pref in name:
-                        found_model_name = name # 获取完整的 resource name
-                        logger.info(f"✅ 自动选中模型: {found_model_name}")
-                        break
-                if found_model_name: break
-            
-            # 如果没筛选到，但列表不为空，拿第一个 gemini 开头的
-            if not found_model_name and available_models:
-                for m in available_models:
-                    if "gemini" in m['name'] and "generateContent" in m.get('supportedGenerationMethods', []):
-                        found_model_name = m['name']
-                        break
-        else:
-            logger.warning(f"❌ 获取模型列表失败: {list_resp.status_code} - {list_resp.text}")
-            # 如果 v1beta 列不出模型，尝试降级硬编码 v1 的 gemini-pro
-            found_model_name = "models/gemini-pro" 
-
-    except Exception as e:
-        logger.error(f"❌ 模型发现异常: {e}")
-        found_model_name = "models/gemini-1.5-flash" # 最后的倔强
-
-    # =========================================================
-    # 开始生成内容
-    # =========================================================
-    if not found_model_name:
-        await safe_reply(update, "❌ 您的 API Key 似乎没有权限访问任何模型，请检查 Google Cloud Console API 开启状态。")
-        return
-
-    # 注意：ListModels 返回的名字已经包含了 'models/' 前缀，例如 'models/gemini-1.5-flash'
-    # 所以我们拼接 URL 时不需要再加 /models/
-    # 并且要确保使用 v1beta (ListModels 成功的那个版本)
-    
-    # 清洗一下名字，防止重复拼接
-    clean_model_name = found_model_name.replace("models/", "")
-    
-    final_url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model_name}:generateContent?key={MY_KEY}"
-    
+    # 拼接 URL
+    url = f"{api_base}/models/{model_name}:generateContent?key={MY_KEY}"
     payload = { "contents": [{ "parts": [{"text": prompt_text}] }] }
     
     try:
-        logger.info(f"🚀 最终尝试 URL: {final_url.replace(MY_KEY, '******')}")
-        response = await GLOBAL_HTTP_CLIENT.post(final_url, json=payload, timeout=60.0)
+        # 发送请求
+        response = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=60.0)
         
         if response.status_code == 200:
             data = response.json()
             if 'candidates' in data and data['candidates']:
                 content = data['candidates'][0]['content']['parts'][0]['text']
-                await safe_reply(update, f"📅 <b>今日 AI 简报</b>\n(Model: {clean_model_name})\n\n{content}", parse_mode='HTML')
+                await safe_reply(update, f"📅 <b>今日 AI 简报</b>\n(Model: {model_name})\n\n{content}", parse_mode='HTML')
             else:
-                await safe_reply(update, "❌ AI 返回了空内容 (Safety Filter 可能触发)。")
+                await safe_reply(update, "❌ AI 返回空内容。")
         else:
-            await safe_reply(update, f"❌ 生成失败 ({response.status_code}):\n{response.text[:150]}")
+            await safe_reply(update, f"❌ 生成失败 ({response.status_code}):\n{response.text[:200]}")
 
     except Exception as e:
-        await safe_reply(update, f"❌ 发送请求异常: {e}")
+        await safe_reply(update, f"❌ 网络请求异常: {e}")
         
-
 def setup_calculator_bot(app_instance: Application) -> None:
     async def calc_start(update, context):
         await safe_reply(update, "👋 我是智能计算器。\n\n1️⃣ 发送算式\n2️⃣ 发送 <b>新股</b>\n3️⃣ 发送 <b>日报</b>", parse_mode='HTML')
