@@ -419,22 +419,28 @@ def setup_calculator_bot(app_instance: Application) -> None:
     app_instance.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, calc))
 
 # ==============================================================================
-# 7. 启动
+# 7. 启动 (修正版：防止 Token 重复导致的互踢冲突)
 # ==============================================================================
 app = FastAPI()
 
 @app.on_event("startup")
 async def startup_event():
     global GLOBAL_HTTP_CLIENT, PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
+    
+    # 1. 初始化基础组件
     GLOBAL_HTTP_CLIENT = httpx.AsyncClient(timeout=30.0, verify=False)
     try:
         PLAYWRIGHT_INSTANCE = await async_playwright().start()
-        BROWSER_INSTANCE = await PLAYWRIGHT_INSTANCE.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
+        BROWSER_INSTANCE = await PLAYWRIGHT_INSTANCE.chromium.launch(
+            headless=True, 
+            args=["--no-sandbox", "--disable-gpu"]
+        )
         app.state.browser = BROWSER_INSTANCE
-        logger.info("✅ System Ready")
-    except Exception as e: logger.error(e)
+        logger.info("✅ System Ready: Playwright Started")
+    except Exception as e: 
+        logger.error(f"System Start Error: {e}")
 
-    # 加载全局媒体资源
+    # 2. 加载全局资源 (图片/视频)
     global GLOBAL_IMAGE_MAP, GLOBAL_IMAGE_PATTERN, GLOBAL_VIDEO_MAP, GLOBAL_VIDEO_PATTERN
     for i in range(1, 11):
         k, v = os.getenv(f"IMAGE_{i}_KEYS"), os.getenv(f"IMAGE_{i}_URL")
@@ -443,13 +449,25 @@ async def startup_event():
         k, v = os.getenv(f"VIDEO_{i}_KEYS"), os.getenv(f"VIDEO_{i}_URL")
         if k and v: 
             for key in k.split(','): GLOBAL_VIDEO_MAP[key.strip()] = v
+            
     if GLOBAL_IMAGE_MAP: GLOBAL_IMAGE_PATTERN = r"^(" + "|".join([re.escape(k) for k in GLOBAL_IMAGE_MAP.keys()]) + r")$"
     if GLOBAL_VIDEO_MAP: GLOBAL_VIDEO_PATTERN = r"^(" + "|".join([re.escape(k) for k in GLOBAL_VIDEO_MAP.keys()]) + r")$"
 
-    # 启动工兵 1-10
+    # 🔥🔥🔥 3. 核心修正：Token 去重池 🔥🔥🔥
+    # 记录已经启动过的 Token，防止同一个 Token 启动两次导致 Conflict
+    active_tokens = set()
+
+    # --- 启动工兵 1-10 ---
     for i in range(1, 10):
         token = os.getenv(f"BOT_TOKEN_{i}")
+        
         if token:
+            # 🛑 检查：Token 是否已存在？
+            if token in active_tokens:
+                logger.warning(f"⚠️ 跳过 Bot {i}: Token 已经被其他 Bot 使用了！(防止冲突)")
+                continue
+            
+            # ✅ 启动 Bot
             bot = Application.builder().token(token).build()
             bot.bot_data["fastapi_app"] = app
             bot.bot_data["bot_index"] = i
@@ -458,25 +476,35 @@ async def startup_event():
             
             path = f"bot{i}_webhook"
             BOT_APPLICATIONS[path] = bot
+            
+            # 读取其他配置
             if url := os.getenv(f"BOT_{i}_API_URL"): BOT_API_URLS[path] = url
             if url := os.getenv(f"BOT_{i}_APK_URL"): BOT_APK_URLS[path] = url
             if al := os.getenv(f"BOT_{i}_ALLOWED_CHAT_IDS"): BOT_ALLOWED_CHATS[path] = [c.strip() for c in al.split(',')]
             
             await bot.start()
-            await bot.updater.start_polling()
+            await bot.updater.start_polling(drop_pending_updates=True) # 🔥 加这个参数减少启动时的旧消息堆积
             logger.info(f"Worker {i} Started")
+            
+            # 📝 记录这个 Token 已使用
+            active_tokens.add(token)
 
-    # 启动计算器
+    # --- 启动计算器 ---
     calc_token = os.getenv("CALC_BOT_TOKEN")
     if calc_token:
-        c_bot = Application.builder().token(calc_token).build()
-        await c_bot.initialize()
-        setup_calculator_bot(c_bot) # 计算器配置
-        await c_bot.start()
-        await c_bot.updater.start_polling()
-        BOT_APPLICATIONS["calc"] = c_bot
-        logger.info("Calc Bot Started")
-
+        # 🛑 检查：Token 是否已存在？
+        if calc_token in active_tokens:
+             logger.warning("⚠️ 跳过计算器 Bot: Token 已经被工兵 Bot 使用了！(防止冲突)")
+        else:
+            c_bot = Application.builder().token(calc_token).build()
+            await c_bot.initialize()
+            setup_calculator_bot(c_bot) # 计算器配置
+            await c_bot.start()
+            await c_bot.updater.start_polling(drop_pending_updates=True)
+            BOT_APPLICATIONS["calc"] = c_bot
+            logger.info("Calc Bot Started")
+            active_tokens.add(calc_token)
+            
 @app.on_event("shutdown")
 async def shutdown():
     if GLOBAL_HTTP_CLIENT: await GLOBAL_HTTP_CLIENT.aclose()
