@@ -21,12 +21,11 @@ from playwright.async_api import async_playwright, Playwright, Browser, TimeoutE
 # 引入安全计算库
 from simpleeval import simple_eval
 
-# 🔥 引入 AI 和 RSS 依赖
+# 🔥 引入 RSS 依赖 (注意：不再需要 openai 库了)
 import feedparser
-from openai import AsyncOpenAI
 
 # ==============================================================================
-# 1. 日志配置 (优化部分：降噪模式)
+# 1. 日志配置
 # ==============================================================================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -40,7 +39,6 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
-logging.getLogger("openai").setLevel(logging.WARNING)
 
 # --- 2. 全局状态 ---
 BOT_APPLICATIONS: Dict[str, Application] = {}
@@ -51,7 +49,6 @@ BOT_ALLOWED_CHATS: Dict[str, List[str]] = {}
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 GLOBAL_HTTP_CLIENT: httpx.AsyncClient | None = None
-AI_CLIENT: AsyncOpenAI | None = None
 
 # 🔥 默认 RSS 源
 DEFAULT_RSS_FEEDS = [
@@ -378,15 +375,18 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if page: await page.close()
             if browser_context: await browser_context.close()
 
-# --- 🔥 AI 日报生成器 ---
+# --- 🔥 [修改版] 原生 HTTP 日报生成器 (100% 解决版本号错误) ---
 async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """抓取 RSS 并调用 Google 生成简报"""
-    if not AI_CLIENT:
+    """抓取 RSS 并直接调用 Google 原生 API (无视 OpenAI 库)"""
+    # 1. 还是从 Render 环境变量里读 Key，安全第一
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
         await safe_reply(update, "❌ AI 服务未配置 (API Key 缺失)")
         return
 
     await safe_reply(update, "☕️ 正在为您抓取新闻并生成 AI 简报，请稍候...")
     
+    # 2. 抓取 RSS
     all_entries = []
     try:
         for feed_url in DEFAULT_RSS_FEEDS:
@@ -398,31 +398,41 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
         await safe_reply(update, "📭 今日暂无新闻更新。")
         return
 
+    # 3. 准备提示词
     selected_entries = all_entries[:5] 
     prompt_text = "请将以下科技新闻总结为一份简报。要求：\n1. 中文回答\n2. 每条新闻用一个emoji开头\n3. 语言简练，重点突出\n4. 不需要打招呼，直接输出内容\n\n新闻内容：\n"
-    
     for entry in selected_entries:
         title = entry.get('title', '无标题')
         link = entry.get('link', '')
         summary = entry.get('summary', '')[:200]
         prompt_text += f"标题：{title}\n链接：{link}\n摘要：{summary}\n---\n"
 
+    # 4. 🔥 核心：原生直连 Google API (绝对没有 v1main 这种鬼东西)
+    # 这个 URL 是 Google 官方标准文档里的，绝对正确
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt_text}]
+        }]
+    }
+
     try:
-        model_name = os.getenv("AI_MODEL_NAME", "gemini-1.5-flash")
-        response = await AI_CLIENT.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": "你是一个专业的科技新闻编辑。"},
-                {"role": "user", "content": prompt_text}
-            ],
-            max_tokens=800
-        )
-        ai_content = response.choices[0].message.content
+        # 使用 httpx 直接发请求，绕过所有库
+        if not GLOBAL_HTTP_CLIENT: raise RuntimeError("HTTP Client not ready")
+        
+        response = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=60.0)
+        response.raise_for_status() # 如果报错，这里会直接抛出详细原因
+        
+        data = response.json()
+        # 提取 Google 返回的内容
+        ai_content = data['candidates'][0]['content']['parts'][0]['text']
+        
         final_msg = f"📅 <b>今日 AI 简报</b>\n\n{ai_content}"
         await safe_reply(update, final_msg, parse_mode='HTML')
         
     except Exception as e:
-        logger.error(f"AI Generation Error: {e}")
+        logger.error(f"Google Direct API Error: {e}")
         await safe_reply(update, f"❌ AI 生成失败: {str(e)}")
 
 
@@ -501,26 +511,12 @@ async def startup_event():
     global BOT_APPLICATIONS, BOT_API_URLS, BOT_APK_URLS, BOT_SCHEDULES, BOT_ALLOWED_CHATS, PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
     global GLOBAL_IMAGE_MAP, GLOBAL_IMAGE_PATTERN, GLOBAL_VIDEO_MAP, GLOBAL_VIDEO_PATTERN
     global GLOBAL_HTTP_CLIENT
-    global AI_CLIENT 
-
+    
+    # 🔥 初始化全局 HTTP 客户端
     GLOBAL_HTTP_CLIENT = httpx.AsyncClient(timeout=30.0, verify=False, limits=httpx.Limits(max_keepalive_connections=20, max_connections=50))
     
-    # 🔥🔥🔥 1. 这里是唯一的改动：强制写死 Google 地址，并打印日志 🔥🔥🔥
-    api_key = os.getenv("OPENAI_API_KEY") 
-    base_url = "https://generativelanguage.googleapis.com/v1beta/openai/" 
-    
-    # 📝 打印出来，看看 Render 到底有没有读到这段代码！
-    print(f"DEBUG: 正在初始化 AI... KEY长度={len(api_key) if api_key else 0}, URL={base_url}")
-
-    if api_key:
-        try:
-            AI_CLIENT = AsyncOpenAI(api_key=api_key, base_url=base_url)
-            logger.info("✅ AI Client (Google Direct) 初始化成功")
-        except Exception as e:
-            logger.error(f"❌ AI Client 初始化失败: {e}")
-    else:
-        logger.warning("⚠️ 未检测到 OPENAI_API_KEY，AI 功能将不可用")
-    # 🔥🔥🔥 改动结束 🔥🔥🔥
+    # 注意：这里不再初始化 AI_CLIENT，因为我们在函数里直接用 HTTP 请求了
+    logger.info("✅ HTTP Client 初始化成功 (Google 原生模式已就绪)")
 
     BOT_APPLICATIONS = {}
     BOT_API_URLS = {}
@@ -585,7 +581,6 @@ async def shutdown_event():
     if GLOBAL_HTTP_CLIENT: await GLOBAL_HTTP_CLIENT.aclose()
     if BROWSER_INSTANCE: await BROWSER_INSTANCE.close()
     if PLAYWRIGHT_INSTANCE: await PLAYWRIGHT_INSTANCE.stop()
-    if AI_CLIENT: await AI_CLIENT.close()
 
 @app.post("/{webhook_path}")
 async def handle_webhook(webhook_path: str, request: Request):
