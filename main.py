@@ -5,6 +5,7 @@ import re
 import random
 import string
 import datetime
+from datetime import date, datetime # 🔥 新增：用于日期比对
 from urllib.parse import urlparse
 from typing import List, Dict, Any
 
@@ -54,7 +55,7 @@ DEFAULT_RSS_FEEDS = [
     "http://www.zhihudaily.com/#/index",
 ]
 
-# 正则 (你原本的)
+# 正则
 UNIVERSAL_COMMAND_PATTERN = r"^(地址|安装地址|安装链接|下载地址|下载链接|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接)$"
 ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(提包|安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
 IOS_QUIT_PATTERN = r"^(苹果大退|苹果重启|苹果大退重启|苹果黑屏|苹果重开)$"
@@ -166,15 +167,12 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             page = await context_p.new_page()
             
             # 🔥 修正点 1：将 wait_until 改为 'networkidle'
-            # 'networkidle' 表示至少 500ms 内没有网络请求，意味着跳转通常已经结束了
             try:
                 await page.goto(domain_a, wait_until="networkidle", timeout=25000)
             except Exception:
-                # 如果 networkidle 超时（比如网页有个一直在动的倒计时），兜底不做处理，继续往下走
                 pass
 
-            # 🔥 修正点 2：增加硬等待时间，从 1500 增加到 3000 (3秒)
-            # 给那些慢吞吞的 JS 跳转多一点时间
+            # 🔥 修正点 2：增加硬等待时间
             try: await page.wait_for_timeout(3000)
             except: pass
             
@@ -241,13 +239,13 @@ async def call_gemini(prompt: str, model: str = "gemini-2.5-flash") -> str:
     except Exception as e: return f"Net Error: {e}"
 
 # ==============================================================================
-# 修正后的 get_ipo_info (完美对应截图列号 + 格式合并)
+# 修正后的 get_ipo_info (日期过滤 + 保留表头)
 # ==============================================================================
 async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(update, "CalcBot", "IPO Query")
     if not BROWSER_INSTANCE: return await safe_reply(update, "❌ 浏览器未就绪")
     
-    await safe_reply(update, "🔍 正在检索新股数据...")
+    await safe_reply(update, "🔍 正在检索并筛选最新新股...")
     
     async with BROWSER_LOCK:
         page = None
@@ -260,35 +258,60 @@ async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await page.wait_for_selector("#NewStockTable", state="visible", timeout=10000)
             except: pass 
 
-            # 2. 📸 截图
-            img = await page.screenshot(full_page=False)
-            await update.message.reply_photo(photo=img, caption="📸 新浪财经实时数据")
-
-            # 3. 📝 抓取文字 (根据截图修正列索引)
-            # tds[0]:证券代码, tds[1]:申购代码(跳过), tds[2]:证券简称, tds[3]:上网发行日期, tds[4]:上市日期
+            # 2. 📝 抓取文字
             rows_data = await page.evaluate('''() => {
+                // 跳过前2行表头，抓取接下来的 30 行，因为我们要过滤掉历史数据
                 const rows = Array.from(document.querySelectorAll('#NewStockTable tr')).slice(2); 
-                return rows.slice(0, 15).map(tr => {
+                return rows.slice(0, 30).map(tr => {
                     const tds = tr.querySelectorAll('td');
                     if (tds.length < 5) return null; 
                     return {
-                        code: tds[0].innerText.trim(),     // 证券代码
-                        name: tds[2].innerText.trim(),     // 证券简称 (修正为第3列)
-                        sub_date: tds[3].innerText.trim(), // 申购日
-                        list_date: tds[4].innerText.trim() // 上市日
+                        code: tds[0].innerText.trim(),      // 证券代码
+                        name: tds[2].innerText.trim(),      // 证券简称
+                        sub_date: tds[3].innerText.trim(),  // 申购日
+                        list_date: tds[4].innerText.trim()  // 上市日
                     };
                 }).filter(item => item !== null);
             }''')
 
-            # 4. 格式化输出
+            # 3. 📅 核心逻辑：日期过滤
+            valid_rows = []
+            today = date.today()
+
             if rows_data:
-                # 标题
-                msg_lines = ["🔔 <b>近期新股 (代码 / 简称 / 申购日 / 上市日)</b>"]
-                
                 for item in rows_data:
-                    # 如果上市日为空，显示 -
+                    l_str = item['list_date']
+                    keep = False
+                    
+                    if l_str == "-" or not l_str:
+                        # 如果没有上市日期，说明还没上市，保留
+                        keep = True
+                    else:
+                        try:
+                            # 字符串转日期
+                            l_date = datetime.strptime(l_str, "%Y-%m-%d").date()
+                            # 只有 >= 今天 才保留
+                            if l_date >= today:
+                                keep = True
+                        except:
+                            keep = True
+                            
+                    if keep:
+                        valid_rows.append(item)
+
+                # 只取前 15 条
+                valid_rows = valid_rows[:15]
+
+            # 4. 格式化输出
+            if valid_rows:
+                # 🔔 标题
+                msg_lines = ["🔔 <b>近期新股日历 (从今日起)</b>"]
+                
+                # 🔥 你要求的保留表头
+                msg_lines.append("• 证券代码 证券简称 申购日 / 上市日") 
+                
+                for item in valid_rows:
                     l_date = item['list_date'] if item['list_date'] else "-"
-                    # 如果申购日为空，也显示 - (以防万一)
                     s_date = item['sub_date'] if item['sub_date'] else "-"
                     
                     # 格式：• 688805 健信超导 2025-12-15 / -
@@ -298,11 +321,11 @@ async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 final_text = "\n".join(msg_lines)
                 await safe_reply(update, final_text, parse_mode='HTML')
             else:
-                await safe_reply(update, "⚠️ 数据抓取为空，请查看截图。")
+                await safe_reply(update, "⚠️ 近期没有待上市的新股。")
 
         except Exception as e:
             logger.error(f"IPO Error: {e}")
-            await safe_reply(update, f"查询部分失败: {e}")
+            await safe_reply(update, f"查询失败: {e}")
         finally:
             if page: await page.close()
 
@@ -383,8 +406,6 @@ def setup_calculator_bot(app_instance: Application) -> None:
     async def book(u,c): 
         q = " ".join(c.args)
         if not q: return await safe_reply(u, "请加关键词")
-        # 修正前: await call_gemini(..., parse_mode='Markdown') -> 报错
-        # 修正后: safe_reply(..., parse_mode='Markdown')
         ai_text = await call_gemini(f"推荐3本关于{q}的书，带理由和摘抄")
         await safe_reply(u, ai_text, parse_mode='Markdown')
     
@@ -417,6 +438,11 @@ def setup_calculator_bot(app_instance: Application) -> None:
             await safe_reply(u, f"🔢 {res}")
 
     app_instance.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, calc))
+
+# ==============================================================================
+# 7. 启动 (请确保这一行 app = FastAPI() 在 @app.on_event 之前！！！)
+# ==============================================================================
+app = FastAPI()
 
 @app.on_event("startup")
 async def startup_event():
@@ -523,7 +549,7 @@ async def startup_event():
                 logger.error(f"❌ Calc Bot 启动失败: {e}")
     else:
         logger.info("ℹ️ 未检测到 CALC_BOT_TOKEN，计算器未启动。")
-            
+
 @app.on_event("shutdown")
 async def shutdown():
     if GLOBAL_HTTP_CLIENT: await GLOBAL_HTTP_CLIENT.aclose()
