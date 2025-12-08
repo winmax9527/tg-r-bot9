@@ -16,7 +16,8 @@ from simpleeval import simple_eval
 from fastapi import FastAPI, Request, Response
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.error import BadRequest
+# 🔥 修改点1：引入 Conflict 异常
+from telegram.error import BadRequest, Conflict
 from playwright.async_api import async_playwright, Playwright, Browser, TimeoutError as PlaywrightTimeoutError
 
 # ==============================================================================
@@ -158,7 +159,14 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             domain_a = api_data.get("data", "").strip()
             if not domain_a.startswith(('http://', 'https://')): domain_a = 'http://' + domain_a
             
-            context_p = await context.bot_data["fastapi_app"].state.browser.new_context(user_agent=user_agent)
+            # 使用保存的 Browser 实例
+            browser = context.bot_data["fastapi_app"].state.browser
+            if not browser:
+                 # 如果全局还没好，尝试用全局变量
+                 if BROWSER_INSTANCE: browser = BROWSER_INSTANCE
+                 else: raise RuntimeError("Browser not ready")
+            
+            context_p = await browser.new_context(user_agent=user_agent)
             page = await context_p.new_page()
             
             try:
@@ -361,7 +369,6 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
     if GLOBAL_VIDEO_PATTERN:
         app_instance.add_handler(MessageHandler(filters.Regex(GLOBAL_VIDEO_PATTERN), lambda u,c: send_global_media(u,c,True)))
 
-# 🔥🔥🔥 重点修改：增加了提示语 🔥🔥🔥
 def setup_calculator_bot(app_instance: Application) -> None:
     async def start(u, c):
         await safe_reply(u, "👋 我是智能计算器。\n功能：计算、新股、日报、/book、/quote")
@@ -371,21 +378,21 @@ def setup_calculator_bot(app_instance: Application) -> None:
     async def book(u,c): 
         q = " ".join(c.args)
         if not q: return await safe_reply(u, "请加关键词")
-        await safe_reply(u, "📚 正在为您寻找好书，请稍候...") # ✅ 新增提示
+        await safe_reply(u, "📚 正在为您寻找好书，请稍候...") 
         ai_text = await call_gemini(f"推荐3本关于{q}的书，带理由和摘抄")
         await safe_reply(u, ai_text, parse_mode='Markdown')
     
     async def quote(u,c): 
         q = " ".join(c.args)
         t = f"《{q}》" if q else "名著"
-        await safe_reply(u, "📜 正在翻阅名著摘录金句，请稍候...") # ✅ 新增提示
+        await safe_reply(u, "📜 正在翻阅名著摘录金句，请稍候...") 
         ai_text = await call_gemini(f"从{t}找一段经典摘抄并赏析")
         await safe_reply(u, ai_text, parse_mode='Markdown')
     
     async def deep(u,c): 
         q = " ".join(c.args)
         if not q: return await safe_reply(u, "请加话题")
-        await safe_reply(u, "🧠 正在深度思考，请稍候...") # ✅ 新增提示
+        await safe_reply(u, "🧠 正在深度思考，请稍候...") 
         ai_text = await call_gemini(f"深度解析话题：{q}")
         await safe_reply(u, ai_text, parse_mode='Markdown')
 
@@ -409,6 +416,11 @@ def setup_calculator_bot(app_instance: Application) -> None:
 # 7. 启动
 # ==============================================================================
 app = FastAPI()
+
+# 🔥 修改点2：添加根路由，通过 Render 的健康检查
+@app.get("/")
+async def root():
+    return {"status": "ok", "msg": "Bot Service is Running (Shield Mode)"}
 
 @app.on_event("startup")
 async def startup_event():
@@ -448,18 +460,16 @@ async def startup_event():
     # 3. 启动 Bot
     active_tokens = set()
 
-    # --- 工兵 ---
-    for i in range(1, 10):
+    # --- 工兵 (1-10) ---
+    for i in range(1, 11):
         raw_token = os.getenv(f"BOT_TOKEN_{i}")
         
         if raw_token:
             token = raw_token.strip() 
             if len(token) < 10:
-                logger.warning(f"⚠️ Bot {i} Token 看起来太短了，可能配置错误。")
                 continue
                 
             if token in active_tokens:
-                logger.warning(f"⚠️ 跳过 Bot {i}: Token 已经被其他 Bot 使用了！(防止冲突)")
                 continue
             
             try:
@@ -478,9 +488,17 @@ async def startup_event():
                     BOT_ALLOWED_CHATS[path] = [c.strip() for c in al.split(',')]
                 
                 await bot.start()
-                await bot.updater.start_polling(drop_pending_updates=True)
-                logger.info(f"✅ Worker {i} Started (Token ends with {token[-4:]})")
                 
+                # 🔥🔥🔥 修改点3：工兵的防冲突盾牌 🔥🔥🔥
+                try:
+                    await bot.updater.start_polling(drop_pending_updates=True)
+                    logger.info(f"✅ Worker {i} Started Polling")
+                except Conflict:
+                    logger.warning(f"🛡️ 触发盾牌: Worker {i} 遇到 Conflict (正常)，等待旧实例退出...")
+                except Exception as e:
+                    logger.error(f"❌ Worker {i} Polling Error: {e}")
+                # 🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥
+
                 active_tokens.add(token)
             except Exception as e:
                 logger.error(f"❌ Worker {i} 启动失败: {e}")
@@ -499,10 +517,20 @@ async def startup_event():
                 await c_bot.initialize()
                 setup_calculator_bot(c_bot)
                 await c_bot.start()
-                await c_bot.updater.start_polling(drop_pending_updates=True)
+                
+                # 🔥🔥🔥 修改点4：计算器的防冲突盾牌 🔥🔥🔥
+                try:
+                    await c_bot.updater.start_polling(drop_pending_updates=True)
+                    logger.info(f"✅ Calc Bot Started Polling")
+                except Conflict:
+                    logger.warning(f"🛡️ 触发盾牌: Calc Bot 遇到 Conflict (正常)，等待旧实例退出...")
+                except Exception as e:
+                    logger.error(f"❌ Calc Bot Polling Error: {e}")
+                # 🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥
+
                 BOT_APPLICATIONS["calc"] = c_bot
-                logger.info(f"✅ Calc Bot Started (Token ends with {calc_token[-4:]})")
                 active_tokens.add(calc_token)
+                logger.info(f"✅ Calc Bot Started (Token ends with {calc_token[-4:]})")
             except Exception as e:
                 logger.error(f"❌ Calc Bot 启动失败: {e}")
     else:
@@ -518,15 +546,10 @@ async def shutdown():
     # 2. 优雅关闭所有 Bot
     for b in BOT_APPLICATIONS.values():
         try:
-            # 🔥 关键修复：先强制停止轮询，防止 "Updater is still running" 错误
             if b.updater and b.updater.running:
                 await b.updater.stop()
-            
-            # 然后再停止 App
             if b.running:
                 await b.stop()
-            
-            # 最后释放资源
             await b.shutdown()
         except Exception as e:
             logger.error(f"Error shutting down bot: {e}")
