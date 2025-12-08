@@ -18,7 +18,7 @@ from telegram.error import BadRequest
 from playwright.async_api import async_playwright, Playwright, Browser, TimeoutError as PlaywrightTimeoutError
 
 # ==============================================================================
-# 1. 详细日志配置 (恢复详细记录)
+# 1. 详细日志配置
 # ==============================================================================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -26,9 +26,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("BotLogic")
 
-# 只屏蔽底层的杂音，保留重要业务日志
+# 降噪
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # ==============================================================================
 # 2. 全局变量与配置
@@ -52,7 +53,7 @@ DEFAULT_RSS_FEEDS = [
     "http://www.zhihudaily.com/#/index",
 ]
 
-# 正则表达式 (严格保留)
+# 正则表达式 (保留原样)
 UNIVERSAL_COMMAND_PATTERN = r"^(地址|安装地址|安装链接|下载地址|下载链接|最新地址|安卓地址|苹果地址|安卓下载地址|苹果下载地址|链接|最新链接|安卓链接|安卓下载链接|最新安卓链接|苹果链接|苹果下载链接|ios链接|最新苹果链接)$"
 ANDROID_SPECIFIC_COMMAND_PATTERN = r"^(提包|安卓专用|安卓专用链接|安卓提包链接|安卓专用地址|安卓提包地址|安卓专用下载|安卓提包)$"
 IOS_QUIT_PATTERN = r"^(苹果大退|苹果重启|苹果大退重启|苹果黑屏|苹果重开)$"
@@ -70,7 +71,7 @@ GLOBAL_VIDEO_MAP: Dict[str, str] = {}
 GLOBAL_VIDEO_PATTERN: str = "" 
 
 # ==============================================================================
-# 3. 核心工具函数 (权限、日志、AI)
+# 3. 核心工具函数
 # ==============================================================================
 
 def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
@@ -80,7 +81,7 @@ def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
         if app_instance is current_app:
             allowed_list = BOT_ALLOWED_CHATS.get(path, [])
             break
-    if not allowed_list: return True # 如果没配置白名单，默认允许（避免配置错误导致无法使用）
+    if not allowed_list: return True 
     
     chat_id_str = str(chat_id)
     possible_ids = {chat_id_str}
@@ -91,13 +92,14 @@ def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
         if cid in allowed_list: return True
     return False
 
-# 🔥 关键：统一日志记录函数
+# 🔥 日志记录：谁在干什么
 def log_user_action(update: Update, bot_name: str, action: str):
+    if not update.effective_user: return
     user = update.effective_user
     chat = update.effective_chat
     u_name = user.username or user.first_name or user.id
     c_id = chat.id if chat else "Unknown"
-    logger.info(f"[{bot_name}] User:{u_name} Chat:{c_id} -> Executing: {action}")
+    logger.info(f"[{bot_name}] User:{u_name} Chat:{c_id} -> Cmd: {action}")
 
 async def safe_reply(update: Update, text: str, parse_mode=None):
     try:
@@ -129,7 +131,7 @@ async def call_gemini_api(prompt: str, model: str = "gemini-2.5-flash") -> str:
         return f"❌ 网络请求异常: {str(e)}"
 
 # ==============================================================================
-# 4. 高级功能 (仅限计算器 Bot 使用)
+# 4. 高级功能 (计算器 Bot 独享)
 # ==============================================================================
 
 # --- AI 文化插件 ---
@@ -213,7 +215,6 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             page = await BROWSER_INSTANCE.new_page()
             await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(1)
-            # 简单粗暴：截图返回，最稳
             screenshot_bytes = await page.screenshot(full_page=False)
             await update.message.reply_photo(photo=screenshot_bytes, caption="📸 新浪财经实时数据")
         except Exception as e:
@@ -235,7 +236,7 @@ def safe_calculate(expression: str):
     except: return None
 
 # ==============================================================================
-# 5. 基础功能 (仅限工兵 Bot 使用)
+# 5. 基础功能 (工兵 Bot 专用)
 # ==============================================================================
 def modify_url_subdomain(url_str: str, new_sub: str) -> str:
     try:
@@ -275,13 +276,11 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             domain_a = api_data.get("data", "").strip()
             if not domain_a.startswith(('http://', 'https://')): domain_a = 'http://' + domain_a
             
-            # 使用 Playwright 获取跳转后地址
             context_p = await context.bot_data["fastapi_app"].state.browser.new_context(user_agent=user_agent)
             page = await context_p.new_page()
             await page.goto(domain_a, wait_until="domcontentloaded", timeout=20000)
             final_url = page.url
             
-            # 随机子域名混淆
             rand_sub = ''.join(random.choices(string.ascii_lowercase + string.digits, k=5))
             final_url = modify_url_subdomain(final_url, rand_sub)
             
@@ -294,36 +293,36 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         finally:
             if page: await page.close()
 
-async def send_static_reply_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, html_msg: str):
+# 🔥 【修正】这里不再使用 lambda，而是完整的函数，确保文字不丢失
+async def send_static_reply_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, html_msg: str, action_name: str):
     bot_index = context.bot_data.get("bot_index", "?")
-    log_user_action(update, f"WorkerBot-{bot_index}", "Static Guide")
+    log_user_action(update, f"WorkerBot-{bot_index}", action_name)
     await safe_reply(update, html_msg, parse_mode='HTML')
 
 # ==============================================================================
 # 6. Bot Setup (职责划分)
 # ==============================================================================
 
-# 🔥 核心：计算器 Bot 配置 (全能王)
+# 🔥 计算器 Bot 配置 (全能王)
 def setup_calculator_bot(app_instance: Application) -> None:
     async def calc_start(update, context):
         log_user_action(update, "CalcBot", "/start")
         await safe_reply(update, "👋 我是智能计算器。\n支持：算式、新股、日报、/book、/quote、/deep")
 
-    # 1. 优先注册命令 Handlers
+    # 1. 注册 AI/高级命令
     app_instance.add_handler(CommandHandler("start", calc_start))
     app_instance.add_handler(CommandHandler("book", handle_book_recommend))
     app_instance.add_handler(CommandHandler("quote", handle_novel_quote))
     app_instance.add_handler(CommandHandler("deep", handle_deep_dive))
 
-    # 2. 注册 Regex Handlers (新股、日报) - 必须在文本计算之前！
+    # 2. 注册 Regex (新股、日报)
     app_instance.add_handler(MessageHandler(filters.Regex(IPO_COMMAND_PATTERN), get_stock_ipo_info))
     app_instance.add_handler(MessageHandler(filters.Regex(DIGEST_COMMAND_PATTERN), handle_daily_digest))
 
-    # 3. 最后注册文本计算 (作为兜底)
+    # 3. 注册 纯文本计算 (兜底)
     async def calc_catch_all(update, context):
         if not update.message or not update.message.text: return
         text = update.message.text.strip()
-        # 如果不是命令，尝试计算
         if not text.startswith("/"):
             res = safe_calculate(text)
             if res:
@@ -332,7 +331,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
 
     app_instance.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, calc_catch_all))
 
-# 🔥 核心：工兵 Bot 配置 (只干苦力)
+# 🔥 工兵 Bot 配置 (只干苦力，文案全恢复！)
 def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
     token_end = app_instance.bot.token[-4:]
     
@@ -342,13 +341,34 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
     
     app_instance.add_handler(CommandHandler("start", worker_start))
     
-    # 注册链接获取
+    # 链接获取
     app_instance.add_handler(MessageHandler(filters.Regex(UNIVERSAL_COMMAND_PATTERN), get_universal_link))
     
-    # 注册静态教程 (使用 lambda 简化代码)
-    app_instance.add_handler(MessageHandler(filters.Regex(IOS_QUIT_PATTERN), lambda u,c: send_static_reply_wrapper(u,c, "📱 <b>苹果大退教程</b>...")))
-    app_instance.add_handler(MessageHandler(filters.Regex(ANDROID_QUIT_PATTERN), lambda u,c: send_static_reply_wrapper(u,c, "🤖 <b>安卓大退教程</b>...")))
-    # ... 其他静态规则雷同，为节省篇幅省略重复，逻辑一致 ...
+    # 🔥🔥🔥 教程全家桶 (文字完全恢复) 🔥🔥🔥
+    
+    # 1. 苹果大退
+    msg_ios_quit = "📱 <b>苹果APP大退重新打开步骤</b>\n\n1. 上滑停留调出后台。\n2. 上滑关闭App卡片。\n3. 重新点击图标打开。"
+    app_instance.add_handler(MessageHandler(filters.Regex(IOS_QUIT_PATTERN), lambda u,c: send_static_reply_wrapper(u,c, msg_ios_quit, "IOS Quit Guide")))
+    
+    # 2. 安卓大退
+    msg_android_quit = "🤖 <b>安卓APP大退重新打开步骤</b>\n\n1. 上滑或点击多任务键进入后台。\n2. 上滑关闭App卡片。\n3. 重新打开App。"
+    app_instance.add_handler(MessageHandler(filters.Regex(ANDROID_QUIT_PATTERN), lambda u,c: send_static_reply_wrapper(u,c, msg_android_quit, "Android Quit Guide")))
+
+    # 3. 安卓浏览器设置
+    msg_android_browser = "🤖 <b>安卓浏览器设置手机版</b>\n\n1. 打开浏览器菜单(≡或⋮)。\n2. 找到“桌面版”或“电脑模式”。\n3. <b>取消勾选</b>它。"
+    app_instance.add_handler(MessageHandler(filters.Regex(ANDROID_BROWSER_PATTERN), lambda u,c: send_static_reply_wrapper(u,c, msg_android_browser, "Android Browser Guide")))
+
+    # 4. 苹果浏览器设置
+    msg_ios_browser = "📱 <b>苹果浏览器设置手机版</b>\n\n1. 点击地址栏左侧(大小/AA)。\n2. 选择“请求移动网站”。\n(如果显示“请求桌面网站”则无需操作)"
+    app_instance.add_handler(MessageHandler(filters.Regex(IOS_BROWSER_PATTERN), lambda u,c: send_static_reply_wrapper(u,c, msg_ios_browser, "IOS Browser Guide")))
+
+    # 5. 安卓标签上限
+    msg_android_tab = "🤖 <b>安卓窗口上限解决</b>\n\n1. 点击浏览器标签页图标(数字框)。\n2. 选择“关闭所有标签页”或手动关闭旧标签。"
+    app_instance.add_handler(MessageHandler(filters.Regex(ANDROID_TAB_LIMIT_PATTERN), lambda u,c: send_static_reply_wrapper(u,c, msg_android_tab, "Android Tab Limit")))
+
+    # 6. 苹果标签上限
+    msg_ios_tab = "📱 <b>苹果窗口上限解决</b>\n\n1. 长按右下角标签图标。\n2. 选择“关闭所有标签页”。"
+    app_instance.add_handler(MessageHandler(filters.Regex(IOS_TAB_LIMIT_PATTERN), lambda u,c: send_static_reply_wrapper(u,c, msg_ios_tab, "IOS Tab Limit")))
 
 # ==============================================================================
 # 7. 启动逻辑
@@ -359,7 +379,6 @@ app = FastAPI()
 async def startup_event():
     global GLOBAL_HTTP_CLIENT, PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
     
-    # 初始化
     GLOBAL_HTTP_CLIENT = httpx.AsyncClient(timeout=30.0, verify=False)
     try:
         PLAYWRIGHT_INSTANCE = await async_playwright().start()
@@ -378,7 +397,7 @@ async def startup_event():
             application.bot_data["bot_index"] = i 
             await application.initialize()
             
-            # 🔥 这里只调用工兵配置
+            # 🔥 配置工兵逻辑
             setup_worker_bot(application, i)
             
             path = f"bot{i}_webhook"
@@ -397,7 +416,7 @@ async def startup_event():
             calc_app = Application.builder().token(calc_token).build()
             await calc_app.initialize()
             
-            # 🔥 这里调用计算器配置
+            # 🔥 配置计算器逻辑
             setup_calculator_bot(calc_app)
             
             await calc_app.start()
