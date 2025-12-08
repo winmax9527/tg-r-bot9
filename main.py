@@ -152,6 +152,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     page = None 
+
     async with BROWSER_LOCK:
         try:
             if GLOBAL_HTTP_CLIENT is None: raise RuntimeError("HTTP Client error")
@@ -163,8 +164,18 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # 使用浏览器跳转
             context_p = await context.bot_data["fastapi_app"].state.browser.new_context(user_agent=user_agent)
             page = await context_p.new_page()
-            await page.goto(domain_a, wait_until="domcontentloaded", timeout=25000)
-            try: await page.wait_for_timeout(1500)
+            
+            # 🔥 修正点 1：将 wait_until 改为 'networkidle'
+            # 'networkidle' 表示至少 500ms 内没有网络请求，意味着跳转通常已经结束了
+            try:
+                await page.goto(domain_a, wait_until="networkidle", timeout=25000)
+            except Exception:
+                # 如果 networkidle 超时（比如网页有个一直在动的倒计时），兜底不做处理，继续往下走
+                pass
+
+            # 🔥 修正点 2：增加硬等待时间，从 1500 增加到 3000 (3秒)
+            # 给那些慢吞吞的 JS 跳转多一点时间
+            try: await page.wait_for_timeout(3000)
             except: pass
             
             final_url_b = page.url
@@ -230,7 +241,7 @@ async def call_gemini(prompt: str, model: str = "gemini-2.5-flash") -> str:
     except Exception as e: return f"Net Error: {e}"
 
 # ==============================================================================
-# 修正后的 get_ipo_info (截图 + 抓取文字)
+# 修正后的 get_ipo_info (完美对应截图列号 + 格式合并)
 # ==============================================================================
 async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(update, "CalcBot", "IPO Query")
@@ -242,48 +253,52 @@ async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         page = None
         try:
             page = await BROWSER_INSTANCE.new_page()
-            # 1. 打开新浪财经新股页面
+            # 1. 打开页面
             await page.goto("https://vip.stock.finance.sina.com.cn/corp/go.php/vRPD_NewStockIssue/page/1.phtml", timeout=30000)
             
-            # 等待表格加载出来，确保数据有了
             try:
                 await page.wait_for_selector("#NewStockTable", state="visible", timeout=10000)
-            except:
-                pass # 如果没找到ID，可能直接截图也可以，不强求
+            except: pass 
 
-            # 2. 📸 截图并发送 (保持你原有的功能)
+            # 2. 📸 截图
             img = await page.screenshot(full_page=False)
             await update.message.reply_photo(photo=img, caption="📸 新浪财经实时数据")
 
-            # 3. 📝 抓取表格文字数据 (新增功能)
-            # 使用 JS 直接在浏览器里提取前 15 行数据
+            # 3. 📝 抓取文字 (根据截图修正列索引)
+            # tds[0]:证券代码, tds[1]:申购代码(跳过), tds[2]:证券简称, tds[3]:上网发行日期, tds[4]:上市日期
             rows_data = await page.evaluate('''() => {
-                const rows = Array.from(document.querySelectorAll('#NewStockTable tr')).slice(2); // 跳过表头
+                const rows = Array.from(document.querySelectorAll('#NewStockTable tr')).slice(2); 
                 return rows.slice(0, 15).map(tr => {
                     const tds = tr.querySelectorAll('td');
-                    if (tds.length < 4) return null;
-                    // tds[0]:代码, tds[1]:名称, tds[2]:上网日期, tds[3]:上市日期
+                    if (tds.length < 5) return null; 
                     return {
-                        code: tds[0].innerText.trim(),
-                        name: tds[1].innerText.trim(),
-                        date: tds[3].innerText.trim()
+                        code: tds[0].innerText.trim(),     // 证券代码
+                        name: tds[2].innerText.trim(),     // 证券简称 (修正为第3列)
+                        sub_date: tds[3].innerText.trim(), // 申购日
+                        list_date: tds[4].innerText.trim() // 上市日
                     };
                 }).filter(item => item !== null);
             }''')
 
-            # 4. 组装文字并发送
+            # 4. 格式化输出
             if rows_data:
-                msg_lines = ["🔔 <b>近期即将上市 / 待上市</b>"]
+                # 标题
+                msg_lines = ["🔔 <b>近期新股 (代码 / 简称 / 申购日 / 上市日)</b>"]
+                
                 for item in rows_data:
-                    # 如果日期为空，显示 (待定)
-                    date_str = item['date'] if item['date'] else "(待定)"
-                    # 格式：• 001325 元创股份 (待定)
-                    msg_lines.append(f"• <code>{item['code']}</code> {item['name']} {date_str}")
+                    # 如果上市日为空，显示 -
+                    l_date = item['list_date'] if item['list_date'] else "-"
+                    # 如果申购日为空，也显示 - (以防万一)
+                    s_date = item['sub_date'] if item['sub_date'] else "-"
+                    
+                    # 格式：• 688805 健信超导 2025-12-15 / -
+                    line = f"• <code>{item['code']}</code> {item['name']} {s_date} / {l_date}"
+                    msg_lines.append(line)
                 
                 final_text = "\n".join(msg_lines)
                 await safe_reply(update, final_text, parse_mode='HTML')
             else:
-                await safe_reply(update, "⚠️ 未能抓取到文字详情，请参考上方截图。")
+                await safe_reply(update, "⚠️ 数据抓取为空，请查看截图。")
 
         except Exception as e:
             logger.error(f"IPO Error: {e}")
