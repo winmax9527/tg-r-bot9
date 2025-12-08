@@ -202,18 +202,18 @@ async def send_static_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     try: await safe_reply(update, html_msg, parse_mode='HTML')
     except Exception: pass
 
-async def send_ios_quit_guide(u, c): await send_static_reply(u, c, "发送苹果大退", "📱 <b>苹果手机APP大退步骤</b>...")
-async def send_android_quit_guide(u, c): await send_static_reply(u, c, "发送安卓大退", "🤖 <b>安卓手机APP大退步骤</b>...")
-async def send_android_browser_guide(u, c): await send_static_reply(u, c, "发送安卓浏览器", "🤖 <b>安卓浏览器设置手机版</b>...")
-async def send_ios_browser_guide(u, c): await send_static_reply(u, c, "发送苹果浏览器", "📱 <b>苹果浏览器设置手机版</b>...")
-async def send_android_tab_limit_guide(u, c): await send_static_reply(u, c, "发送安卓窗口上限", "🤖 <b>安卓窗口上限解决</b>...")
-async def send_ios_tab_limit_guide(u, c): await send_static_reply(u, c, "发送苹果窗口上限", "📱 <b>苹果窗口上限解决</b>...")
+async def send_ios_quit_guide(u, c): await send_static_reply(u, c, "发送苹果大退", "📱 <b>苹果APP大退重新打开步骤</b>\n\n1. 上滑停留调出后台。\n2. 上滑关闭App卡片。\n3. 重新点击图标打开。")
+async def send_android_quit_guide(u, c): await send_static_reply(u, c, "发送安卓大退", "🤖 <b>安卓APP大退重新打开步骤</b>\n\n1. 上滑或点击多任务键进入后台。\n2. 上滑关闭App卡片。\n3. 重新打开App。")
+async def send_android_browser_guide(u, c): await send_static_reply(u, c, "发送安卓浏览器", "🤖 <b>安卓浏览器设置手机版</b>\n\n1. 打开浏览器菜单(≡或⋮)。\n2. 找到“桌面版”或“电脑模式”。\n3. <b>取消勾选</b>它。")
+async def send_ios_browser_guide(u, c): await send_static_reply(u, c, "发送苹果浏览器", "📱 <b>苹果浏览器设置手机版</b>\n\n1. 点击地址栏左侧(大小/AA)。\n2. 选择“请求移动网站”。\n(如果显示“请求桌面网站”则无需操作)")
+async def send_android_tab_limit_guide(u, c): await send_static_reply(u, c, "发送安卓窗口上限", "🤖 <b>安卓窗口上限解决</b>\n\n1. 点击浏览器标签页图标(数字框)。\n2. 选择“关闭所有标签页”或手动关闭旧标签。")
+async def send_ios_tab_limit_guide(u, c): await send_static_reply(u, c, "发送苹果窗口上限", "📱 <b>苹果窗口上限解决</b>\n\n1. 长按右下角标签图标。\n2. 选择“关闭所有标签页”。")
 
 async def send_global_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     keyword = update.message.text
     url = GLOBAL_IMAGE_MAP.get(keyword)
-    if url: 
+    if url:
         try: await update.message.reply_photo(photo=url)
         except Exception: pass
 
@@ -311,18 +311,16 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if page: await page.close()
             if browser_context: await browser_context.close()
 
-# --- 🔥 [关键修改] 侦探版原生 HTTP 日报生成器 ---
-# --- 🔥 [最终决战版] 切换至 v1 稳定版接口 ---
+# --- 🔥 [终极自适应版] 自动发现可用模型 ---
 async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 1. 获取 Key
     MY_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_GEMINI_KEY")
-    
     if not MY_KEY:
         await safe_reply(update, "❌ 错误：未配置 GEMINI_API_KEY。")
         return
 
-    await safe_reply(update, "☕️ 正在尝试连接 AI 模型生成简报...")
-    
+    await safe_reply(update, "☕️ 正在连接 Google 查询可用模型库...")
+
     # 2. 抓取 RSS (保持不变)
     all_entries = []
     try:
@@ -335,67 +333,101 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
         await safe_reply(update, "📭 今日暂无新闻更新。")
         return
 
-    # 3. 准备提示词 (保持不变)
     prompt_text = "请将以下科技新闻总结为一份简报。要求：\n1. 中文回答\n2. 每条新闻用一个emoji开头\n3. 语言简练\n\n内容：\n"
     for entry in all_entries[:5]:
         title = entry.get('title', '无标题')
         link = entry.get('link', '')
         prompt_text += f"标题：{title}\n链接：{link}\n---\n"
 
-    # 4. 🔥【修改点】使用 v1 稳定版接口 (去掉了 beta)
-    api_base = "https://generativelanguage.googleapis.com/v1"
-
-    # 🔥【修改点】穷举所有可能的模型版本号
-    # Google 有时候别名会失效，直接用具体版本号最稳
-    candidate_models = [
-        "gemini-1.5-flash-002",    # 最新 Flash
-        "gemini-1.5-flash-001",    # 稳定 Flash
-        "gemini-1.5-flash",        # 通用别名
-        "gemini-1.5-pro-002",      # 最新 Pro
-        "gemini-1.5-pro",          # 通用 Pro
-    ]
-
-    last_error = ""
-    success_content = None
-
     if not GLOBAL_HTTP_CLIENT: 
-        await safe_reply(update, "❌ 系统错误: HTTP Client 未就绪")
+        await safe_reply(update, "❌ HTTP Client 未就绪")
         return
 
-    # 开始轮询
-    for model_name in candidate_models:
-        # 拼接 URL
-        url = f"{api_base}/models/{model_name}:generateContent?key={MY_KEY}"
-        payload = { "contents": [{ "parts": [{"text": prompt_text}] }] }
-        
-        try:
-            # 日志记录 (方便排查)
-            logger.info(f"🔗 Trying: {url.replace(MY_KEY, '******')}")
-            
-            response = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=60.0)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if 'candidates' in data and data['candidates']:
-                    success_content = data['candidates'][0]['content']['parts'][0]['text']
-                    logger.info(f"✅ Success with model: {model_name}")
-                    break 
-            else:
-                # 记录具体错误
-                err_msg = response.text
-                # 如果是 404，说明模型名不对，继续下一个；如果是 429(限流) 或 500，也继续
-                last_error = f"{model_name} ({response.status_code}): {err_msg[:100]}"
-                logger.warning(last_error)
-                
-        except Exception as e:
-            last_error = str(e)
-            continue 
+    # =========================================================
+    # 🔥 核心逻辑：先问 Google "我有什么模型？" (ListModels)
+    # =========================================================
+    found_model_name = None
+    last_error = ""
 
-    # 5. 发送结果
-    if success_content:
-        await safe_reply(update, f"📅 <b>今日 AI 简报</b>\n\n{success_content}", parse_mode='HTML')
-    else:
-        await safe_reply(update, f"❌ 简报生成失败。\n最后报错: {last_error}")
+    # 我们优先尝试 v1beta，因为新模型都在这
+    discovery_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={MY_KEY}"
+    
+    try:
+        logger.info(f"🕵️ 正在执行模型自发现: {discovery_url.replace(MY_KEY, '******')}")
+        list_resp = await GLOBAL_HTTP_CLIENT.get(discovery_url, timeout=30.0)
+        
+        if list_resp.status_code == 200:
+            models_data = list_resp.json()
+            available_models = models_data.get('models', [])
+            
+            # 打印出来看看您的账号到底拥有什么 (会在 Render 日志显示)
+            model_names = [m['name'] for m in available_models]
+            logger.info(f"📋 您的账号可用模型列表: {model_names}")
+            
+            # 智能筛选：找一个支持 generateContent 的模型
+            # 优先找 flash, 然后找 pro, 最后随便找一个 gemini
+            preferred_order = ["flash", "pro", "gemini"]
+            
+            for pref in preferred_order:
+                for m in available_models:
+                    name = m['name'] # 格式通常是 models/gemini-1.5-flash
+                    methods = m.get('supportedGenerationMethods', [])
+                    
+                    if "generateContent" in methods and pref in name:
+                        found_model_name = name # 获取完整的 resource name
+                        logger.info(f"✅ 自动选中模型: {found_model_name}")
+                        break
+                if found_model_name: break
+            
+            # 如果没筛选到，但列表不为空，拿第一个 gemini 开头的
+            if not found_model_name and available_models:
+                for m in available_models:
+                    if "gemini" in m['name'] and "generateContent" in m.get('supportedGenerationMethods', []):
+                        found_model_name = m['name']
+                        break
+        else:
+            logger.warning(f"❌ 获取模型列表失败: {list_resp.status_code} - {list_resp.text}")
+            # 如果 v1beta 列不出模型，尝试降级硬编码 v1 的 gemini-pro
+            found_model_name = "models/gemini-pro" 
+
+    except Exception as e:
+        logger.error(f"❌ 模型发现异常: {e}")
+        found_model_name = "models/gemini-1.5-flash" # 最后的倔强
+
+    # =========================================================
+    # 开始生成内容
+    # =========================================================
+    if not found_model_name:
+        await safe_reply(update, "❌ 您的 API Key 似乎没有权限访问任何模型，请检查 Google Cloud Console API 开启状态。")
+        return
+
+    # 注意：ListModels 返回的名字已经包含了 'models/' 前缀，例如 'models/gemini-1.5-flash'
+    # 所以我们拼接 URL 时不需要再加 /models/
+    # 并且要确保使用 v1beta (ListModels 成功的那个版本)
+    
+    # 清洗一下名字，防止重复拼接
+    clean_model_name = found_model_name.replace("models/", "")
+    
+    final_url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model_name}:generateContent?key={MY_KEY}"
+    
+    payload = { "contents": [{ "parts": [{"text": prompt_text}] }] }
+    
+    try:
+        logger.info(f"🚀 最终尝试 URL: {final_url.replace(MY_KEY, '******')}")
+        response = await GLOBAL_HTTP_CLIENT.post(final_url, json=payload, timeout=60.0)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if 'candidates' in data and data['candidates']:
+                content = data['candidates'][0]['content']['parts'][0]['text']
+                await safe_reply(update, f"📅 <b>今日 AI 简报</b>\n(Model: {clean_model_name})\n\n{content}", parse_mode='HTML')
+            else:
+                await safe_reply(update, "❌ AI 返回了空内容 (Safety Filter 可能触发)。")
+        else:
+            await safe_reply(update, f"❌ 生成失败 ({response.status_code}):\n{response.text[:150]}")
+
+    except Exception as e:
+        await safe_reply(update, f"❌ 发送请求异常: {e}")
         
 
 def setup_calculator_bot(app_instance: Application) -> None:
