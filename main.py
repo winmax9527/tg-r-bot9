@@ -18,8 +18,12 @@ from telegram.error import BadRequest
 # 引入 Playwright
 from playwright.async_api import async_playwright, Playwright, Browser, TimeoutError as PlaywrightTimeoutError
 
-# 🔥 [新增] 引入安全计算库
+# 引入安全计算库
 from simpleeval import simple_eval
+
+# 🔥 [新增] 引入 AI 和 RSS 依赖
+import feedparser
+from openai import AsyncOpenAI
 
 # ==============================================================================
 # 1. 日志配置 (优化部分：降噪模式)
@@ -37,6 +41,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING) # 新增 openai 降噪
 
 # --- 2. 全局状态 ---
 BOT_APPLICATIONS: Dict[str, Application] = {}
@@ -49,6 +54,15 @@ BROWSER_INSTANCE: Browser | None = None
 
 # 全局 HTTP 客户端
 GLOBAL_HTTP_CLIENT: httpx.AsyncClient | None = None
+
+# 🔥 [新增] 全局 AI 客户端
+AI_CLIENT: AsyncOpenAI | None = None
+# 🔥 [新增] 默认 RSS 源 (你可以修改这里，或者放到环境变量)
+DEFAULT_RSS_FEEDS = [
+    "https://36kr.com/feed",           # 36氪
+    "https://www.cnbeta.com.tw/backend.php", # cnBeta
+    # "https://feeds.feedburner.com/TechCrunch/" # TechCrunch
+]
 
 # 🔥 核心修复：并发锁 (Semaphore)
 # 限制同一时间只能有 1 个浏览器在运行，防止内存炸裂
@@ -69,8 +83,10 @@ ANDROID_BROWSER_PATTERN = r"^(安卓浏览器手机版|安卓桌面版|安卓浏
 IOS_BROWSER_PATTERN = r"^(苹果浏览器手机版|苹果浏览器|苹果桌面版)$"
 ANDROID_TAB_LIMIT_PATTERN = r"^(安卓窗口上限|窗口上限|标签上限)$"
 IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
-# 🔥 [新增] 新股查询正则
+# 新股查询正则
 IPO_COMMAND_PATTERN = r"^(新股|新股申购|新股上市|近期新股|申购|上市)$"
+# 🔥 [新增] 日报查询正则
+DIGEST_COMMAND_PATTERN = r"^(日报|简报|新闻|每日简报|科技新闻)$"
 
 
 # --- 辅助函数 ---
@@ -450,15 +466,12 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     if not code or not code.isdigit(): continue
                     
                     # 1. 明确日期 (格式正常且是未来/今天)
-                    # 只要长度够长(比如 2025-12-12 是10位)，且是数字开头
                     if len(l_date) >= 8 and l_date[0].isdigit():
                         if l_date >= today_str:
                             display = l_date[5:] if len(l_date)>=10 else l_date
                             confirmed.append(f"• <code>{code}</code> <b>{name}</b> ({display} 上市)")
                     
                     # 2. 待定 (容错逻辑)
-                    # 只要它“不是明确日期”(比如空的、横杠)，并且有申购日(说明是正经新股)
-                    # 就不管它到底显示什么符号，统统算作“待定”
                     elif s_date and len(s_date) >= 5:
                          tbd.append(f"• <code>{code}</code> <b>{name}</b> (待定)")
                 
@@ -488,7 +501,6 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
             # --- 发送结果 ---
             if not result_lines:
-                # 如果还是空的，为了调试，我把获取到的前3条原始数据打出来给您看
                 debug_info = str(stocks_data[:3]) if stocks_data else "未提取到任何行"
                 await safe_reply(update, f"📭 数据列表为空。调试信息: {debug_info}")
             else:
@@ -501,13 +513,75 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
         finally:
             if page: await page.close()
             if browser_context: await browser_context.close()
+
+# --- 🔥 [新增] AI 日报生成器 ---
+async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    抓取 RSS 并调用 One API (Gemini/DeepSeek/etc) 生成简报
+    """
+    if not AI_CLIENT:
+        await safe_reply(update, "❌ AI 服务未配置 (API Key/URL 缺失)")
+        return
+
+    await safe_reply(update, "☕️ 正在为您抓取新闻并生成 AI 简报，请稍候...")
+    
+    # 1. 抓取 RSS (使用 asyncio.to_thread 防止阻塞)
+    all_entries = []
+    try:
+        for feed_url in DEFAULT_RSS_FEEDS:
+            feed = await asyncio.to_thread(feedparser.parse, feed_url)
+            if feed.entries:
+                # 每个源只取前 2 条，避免内容过多
+                all_entries.extend(feed.entries[:2])
+    except Exception as e:
+        logger.error(f"RSS Fetch Error: {e}")
+        await safe_reply(update, "⚠️ 抓取新闻源失败，请稍后重试。")
+        return
+
+    if not all_entries:
+        await safe_reply(update, "📭 今日暂无新闻更新。")
+        return
+
+    # 2. 准备发送给 AI 的文本
+    # 截取前 5 条内容，避免 Token 超标
+    selected_entries = all_entries[:5] 
+    prompt_text = "请将以下科技新闻总结为一份简报。要求：\n1. 中文回答\n2. 每条新闻用一个emoji开头\n3. 语言简练，重点突出\n4. 不需要打招呼，直接输出内容\n\n新闻内容：\n"
+    
+    for entry in selected_entries:
+        title = entry.get('title', '无标题')
+        link = entry.get('link', '')
+        # 简单清洗一下 summary，去掉 html 标签太麻烦，直接取前 200 字
+        summary = entry.get('summary', '')[:200]
+        prompt_text += f"标题：{title}\n链接：{link}\n摘要：{summary}\n---\n"
+
+    # 3. 调用 AI (One API)
+    try:
+        model_name = os.getenv("AI_MODEL_NAME", "gemini-1.5-flash") # 默认用 Gemini Flash
+        response = await AI_CLIENT.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": "你是一个专业的科技新闻编辑。"},
+                {"role": "user", "content": prompt_text}
+            ],
+            max_tokens=800
+        )
+        ai_content = response.choices[0].message.content
         
-# --- 🔥 [修改后] 计算器 Bot 设置 (支持连续计算 + 新股查询) ---
+        # 加上底部的原始链接
+        final_msg = f"📅 <b>今日 AI 简报</b>\n\n{ai_content}"
+        await safe_reply(update, final_msg, parse_mode='HTML') # 如果 AI 输出包含 Markdown 可能需要转义，这里暂且用 HTML 模式尝试，或去掉 parse_mode
+        
+    except Exception as e:
+        logger.error(f"AI Generation Error: {e}")
+        await safe_reply(update, f"❌ AI 生成失败: {str(e)}")
+
+
+# --- 🔥 [修改后] 计算器 Bot 设置 (支持连续计算 + 新股查询 + AI日报) ---
 def setup_calculator_bot(app_instance: Application) -> None:
     """初始化计算器 Bot 的 Handler"""
     
     async def calc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await safe_reply(update, "👋 我是智能计算器。\n\n1️⃣ 发送算式 (如 `100 * 5`)\n2️⃣ 回复结果 `/2` 可继续计算。\n3️⃣ 发送 <b>新股</b> 查询A股申购/上市列表。", parse_mode='HTML')
+        await safe_reply(update, "👋 我是智能计算器。\n\n1️⃣ 发送算式 (如 `100 * 5`)\n2️⃣ 回复结果 `/2` 可继续计算。\n3️⃣ 发送 <b>新股</b> 查询A股申购/上市列表。\n4️⃣ 发送 <b>日报</b> 获取今日 AI 简报。", parse_mode='HTML')
 
     async def calc_handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not update.message or not update.message.text: return
@@ -551,7 +625,10 @@ def setup_calculator_bot(app_instance: Application) -> None:
     # 2. 🔥 优先注册新股查询 (防止 "新股" 两个字进入计算逻辑报错)
     app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(IPO_COMMAND_PATTERN), get_stock_ipo_info))
 
-    # 3. 最后注册通用文本计算
+    # 3. 🔥 [新增] 注册日报查询
+    app_instance.add_handler(MessageHandler(filters.TEXT & filters.Regex(DIGEST_COMMAND_PATTERN), handle_daily_digest))
+
+    # 4. 最后注册通用文本计算
     app_instance.add_handler(MessageHandler(filters.TEXT, calc_handle_message))
 
 # --- Setup Bot (原有) ---
@@ -610,8 +687,22 @@ async def startup_event():
     global BOT_APPLICATIONS, BOT_API_URLS, BOT_APK_URLS, BOT_SCHEDULES, BOT_ALLOWED_CHATS, PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
     global GLOBAL_IMAGE_MAP, GLOBAL_IMAGE_PATTERN, GLOBAL_VIDEO_MAP, GLOBAL_VIDEO_PATTERN
     global GLOBAL_HTTP_CLIENT
+    global AI_CLIENT # 🔥
 
     GLOBAL_HTTP_CLIENT = httpx.AsyncClient(timeout=30.0, verify=False, limits=httpx.Limits(max_keepalive_connections=20, max_connections=50))
+    
+    # 🔥 [新增] 初始化 AI 客户端 (连接到你的 One API)
+    # 记得在 Render 环境变量填 OPENAI_API_KEY 和 OPENAI_BASE_URL
+    api_key = os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("OPENAI_BASE_URL")
+    if api_key and base_url:
+        try:
+            AI_CLIENT = AsyncOpenAI(api_key=api_key, base_url=base_url)
+            logger.info("✅ AI Client (One API) 初始化成功")
+        except Exception as e:
+            logger.error(f"❌ AI Client 初始化失败: {e}")
+    else:
+        logger.warning("⚠️ 未检测到 OPENAI_API_KEY / BASE_URL，AI 日报功能将不可用")
 
     BOT_APPLICATIONS = {}
     BOT_API_URLS = {}
@@ -714,6 +805,8 @@ async def shutdown_event():
         await BROWSER_INSTANCE.close()
     if PLAYWRIGHT_INSTANCE: 
         await PLAYWRIGHT_INSTANCE.stop()
+    if AI_CLIENT: # 🔥 关闭 AI 连接
+        await AI_CLIENT.close()
 
 @app.post("/{webhook_path}")
 async def handle_webhook(webhook_path: str, request: Request):
