@@ -313,14 +313,13 @@ async def get_stock_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # --- 🔥 [关键修改] 侦探版原生 HTTP 日报生成器 ---
 async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 1. 获取 Render 环境变量
+    # 1. 获取 Key
     MY_KEY = os.getenv("GOOGLE_GEMINI_KEY")
-
     if not MY_KEY:
-        await safe_reply(update, "❌ 错误：请在 Render 后台 Environment 页面配置 GOOGLE_GEMINI_KEY。")
+        await safe_reply(update, "❌ 错误：未配置 GOOGLE_GEMINI_KEY。")
         return
 
-    await safe_reply(update, "☕️ 正在为您抓取新闻并生成 AI 简报 (Gemini 1.5 Flash)...")
+    await safe_reply(update, "☕️ 正在尝试连接 AI 模型生成简报...")
     
     # 2. 抓取 RSS
     all_entries = []
@@ -334,43 +333,61 @@ async def handle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
         await safe_reply(update, "📭 今日暂无新闻更新。")
         return
 
-    # 3. 提示词
+    # 3. 准备提示词
     prompt_text = "请将以下科技新闻总结为一份简报。要求：\n1. 中文回答\n2. 每条新闻用一个emoji开头\n3. 语言简练\n\n内容：\n"
     for entry in all_entries[:5]:
         title = entry.get('title', '无标题')
         link = entry.get('link', '')
         prompt_text += f"标题：{title}\n链接：{link}\n---\n"
 
-    # 4. 🔥【核心修复】强制使用 v1beta 和 gemini-1.5-flash
-    # 这是 Google 目前唯一对所有免费 Key 开放且稳定的接口
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={MY_KEY}"
-    
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt_text}]
-        }]
-    }
+    # 4. 🔥【终极方案】定义一个模型列表，轮询尝试，直到成功
+    # 这样不管 Google 怎么改名，或者你的账号支持哪个，总能撞对一个
+    candidate_models = [
+        "gemini-1.5-flash-latest", # 尝试1：最新版 Flash
+        "gemini-1.5-flash",        # 尝试2：标准版 Flash
+        "gemini-1.5-flash-001",    # 尝试3：特定版 Flash
+        "gemini-pro"               # 尝试4：保底 (1.0 Pro，最稳)
+    ]
 
-    try:
-        if not GLOBAL_HTTP_CLIENT: raise RuntimeError("HTTP Client not ready")
-        
-        # 发送请求
-        response = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=60.0)
-        
-        # 错误处理
-        if response.status_code != 200:
-            await safe_reply(update, f"❌ Google 报错 ({response.status_code}):\n{response.text[:300]}")
-            return
+    last_error = ""
+    success_content = None
 
-        # 解析数据
-        data = response.json()
-        ai_content = data['candidates'][0]['content']['parts'][0]['text']
+    if not GLOBAL_HTTP_CLIENT: 
+        await safe_reply(update, "❌ 系统错误: HTTP Client 未就绪")
+        return
+
+    # 开始轮询
+    for model_name in candidate_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={MY_KEY}"
+        payload = { "contents": [{ "parts": [{"text": prompt_text}] }] }
         
-        await safe_reply(update, f"📅 <b>今日 AI 简报</b>\n\n{ai_content}", parse_mode='HTML')
-        
-    except Exception as e:
-        logger.error(f"Google API Error: {e}")
-        await safe_reply(update, f"❌ 处理出错: {e}")
+        try:
+            # 这里的 timeout 设长一点，给 AI 思考时间
+            response = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=60.0)
+            
+            if response.status_code == 200:
+                # 成功！解析数据
+                data = response.json()
+                if 'candidates' in data and data['candidates']:
+                    success_content = data['candidates'][0]['content']['parts'][0]['text']
+                    # 打印一下是哪个模型成功的，方便之后查看日志
+                    logger.info(f"✅ Success with model: {model_name}")
+                    break # 跳出循环
+            else:
+                # 记录错误，尝试下一个
+                last_error = f"Model {model_name} failed: {response.status_code}"
+                logger.warning(last_error)
+                
+        except Exception as e:
+            last_error = str(e)
+            continue # 尝试下一个
+
+    # 5. 发送结果
+    if success_content:
+        await safe_reply(update, f"📅 <b>今日 AI 简报</b>\n\n{success_content}", parse_mode='HTML')
+    else:
+        # 如果所有模型都试完了还不行
+        await safe_reply(update, f"❌ 所有模型均尝试失败。\n最后一次报错: {last_error}\n请检查 Key 是否有效。")
 
 def setup_calculator_bot(app_instance: Application) -> None:
     async def calc_start(update, context):
