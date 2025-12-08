@@ -691,18 +691,21 @@ async def startup_event():
 
     GLOBAL_HTTP_CLIENT = httpx.AsyncClient(timeout=30.0, verify=False, limits=httpx.Limits(max_keepalive_connections=20, max_connections=50))
     
-    # 🔥 [新增] 初始化 AI 客户端 (连接到你的 One API)
-    # 记得在 Render 环境变量填 OPENAI_API_KEY 和 OPENAI_BASE_URL
-    api_key = os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("OPENAI_BASE_URL")
-    if api_key and base_url:
+    # 🔥🔥🔥 强制写死 Google 地址，无视 Render 环境变量的 Bug 🔥🔥🔥
+    api_key = os.getenv("OPENAI_API_KEY") # 还是从环境变量读 Key，比较安全
+    
+    # ⚠️ 唯一的改动就在这里：我帮你把地址焊死在代码里了
+    base_url = "https://generativelanguage.googleapis.com/v1beta/openai/" 
+    
+    if api_key:
         try:
+            # 初始化 AI 客户端
             AI_CLIENT = AsyncOpenAI(api_key=api_key, base_url=base_url)
-            logger.info("✅ AI Client (One API) 初始化成功")
+            logger.info("✅ AI Client (Google Direct) 初始化成功")
         except Exception as e:
             logger.error(f"❌ AI Client 初始化失败: {e}")
     else:
-        logger.warning("⚠️ 未检测到 OPENAI_API_KEY / BASE_URL，AI 日报功能将不可用")
+        logger.warning("⚠️ 未检测到 OPENAI_API_KEY，AI 功能将不可用")
 
     BOT_APPLICATIONS = {}
     BOT_API_URLS = {}
