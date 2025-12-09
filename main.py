@@ -8,6 +8,7 @@ import datetime
 from datetime import date, datetime
 from urllib.parse import urlparse
 from typing import List, Dict, Any
+from functools import wraps  # ✅ 新增：用于装饰器
 
 # 🔥 核心依赖
 import httpx 
@@ -16,12 +17,11 @@ from simpleeval import simple_eval
 from fastapi import FastAPI, Request, Response
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-# 🔥 修改点1：引入 Conflict 异常
 from telegram.error import BadRequest, Conflict
 from playwright.async_api import async_playwright, Playwright, Browser, TimeoutError as PlaywrightTimeoutError
 
 # ==============================================================================
-# 1. 日志配置
+# 1. 日志配置 (✅ 已优化：降噪模式)
 # ==============================================================================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -29,6 +29,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("BotLogic")
 
+# ✅ 屏蔽烦人的 HTTP 访问日志和底层库噪音
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
@@ -73,7 +75,7 @@ GLOBAL_VIDEO_MAP: Dict[str, str] = {}
 GLOBAL_VIDEO_PATTERN: str = "" 
 
 # ==============================================================================
-# 3. 辅助函数
+# 3. 辅助函数 (✅ 已优化：添加装饰器)
 # ==============================================================================
 
 def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
@@ -92,13 +94,47 @@ def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
         if cid in allowed_list: return True
     return False
 
-def log_user_action(update: Update, bot_name: str, action: str):
-    if not update.effective_user: return
-    user = update.effective_user
-    chat = update.effective_chat
-    u_name = user.username or user.first_name or user.id
-    c_id = chat.id if chat else "Unknown"
-    logger.info(f"[{bot_name}] User:{u_name} Chat:{c_id} -> Cmd: {action}")
+# ✅ 新增：日志装饰器 - 自动记录 Bot 交互详情
+def log_interaction(func):
+    @wraps(func)
+    async def wrapper(update, context, *args, **kwargs):
+        # 1. 过滤非 update 调用
+        if not update or not update.effective_user:
+            return await func(update, context, *args, **kwargs)
+
+        user = update.effective_user
+        chat = update.effective_chat
+        # 获取 Bot 用户名，处理 context 可能没有 bot 属性的情况
+        try:
+            bot_username = context.bot.username or f"Bot{context.bot.id}"
+        except:
+            bot_username = "UnknownBot"
+        
+        # 获取指令内容
+        message_text = update.message.text if update.message else "Action"
+        
+        # 2. 记录【收到指令】
+        log_msg_start = (
+            f"🤖[{bot_username}] "
+            f"👤{user.full_name or user.first_name}({user.id}) "
+            f"🏠Chat:{chat.title or '私聊'}({chat.id}) "
+            f"-> 📝Cmd: {message_text}"
+        )
+        logger.info(log_msg_start)
+
+        try:
+            # 3. 执行原有逻辑
+            result = await func(update, context, *args, **kwargs)
+            
+            # 4. 记录【执行成功】
+            logger.info(f"✅[{bot_username}] -> 处理完成 (User:{user.id})")
+            return result
+            
+        except Exception as e:
+            # 5. 记录【执行出错】
+            logger.error(f"❌[{bot_username}] -> 执行出错: {e}", exc_info=True)
+            raise e # 继续抛出异常，不吞没错误
+    return wrapper
 
 async def safe_reply(update: Update, text: str, parse_mode=None):
     try:
@@ -130,10 +166,10 @@ def modify_url_subdomain(url_str: str, new_sub: str) -> str:
         return parsed._replace(netloc=new_netloc).geturl()
     except Exception: return url_str
 
+@log_interaction # ✅ 应用装饰器
 async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
-    bot_id = context.bot_data.get("bot_index", "?")
-    log_user_action(update, f"Worker-{bot_id}", "Get Link")
+    # log_user_action 已被装饰器接管，移除手动调用
 
     current_app = context.application
     api_url = None
@@ -160,7 +196,7 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if not domain_a.startswith(('http://', 'https://')): domain_a = 'http://' + domain_a
             
             # 使用保存的 Browser 实例
-            browser = context.bot_data["fastapi_app"].state.browser
+            browser = context.bot_data.get("fastapi_app").state.browser if context.bot_data.get("fastapi_app") else None
             if not browser:
                  # 如果全局还没好，尝试用全局变量
                  if BROWSER_INSTANCE: browser = BROWSER_INSTANCE
@@ -187,11 +223,13 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await safe_reply(update, msg, parse_mode='HTML')
             await context_p.close()
         except Exception as e:
-            logger.error(f"Link Error: {e}")
+            # 装饰器会记录 Error，这里不需要额外 log
             await safe_reply(update, "❌ 获取失败，请重试。")
+            raise e # 抛出让装饰器记录堆栈
         finally:
             if page: await page.close()
 
+@log_interaction # ✅ 应用装饰器
 async def get_android_specific_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     current_app = context.application
@@ -208,10 +246,12 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
         await safe_reply(update, msg, parse_mode='HTML')
     except Exception: pass
 
+@log_interaction # ✅ 应用装饰器
 async def send_static_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, html_msg: str):
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     await safe_reply(update, html_msg, parse_mode='HTML')
 
+@log_interaction # ✅ 应用装饰器
 async def send_global_media(update: Update, context: ContextTypes.DEFAULT_TYPE, is_video=False):
     if not update.message: return
     key = update.message.text
@@ -239,8 +279,9 @@ async def call_gemini(prompt: str, model: str = "gemini-2.5-flash") -> str:
     except Exception as e: return f"Net Error: {e}"
 
 # 新股逻辑
+@log_interaction # ✅ 应用装饰器
 async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log_user_action(update, "CalcBot", "IPO Query")
+    # log_user_action 已被装饰器接管
     if not BROWSER_INSTANCE: return await safe_reply(update, "❌ 浏览器未就绪")
     
     await safe_reply(update, "🔍 正在检索并筛选最新新股...")
@@ -305,14 +346,16 @@ async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_reply(update, "⚠️ 近期没有待上市的新股。")
 
         except Exception as e:
-            logger.error(f"IPO Error: {e}")
+            # 异常会被装饰器记录，但为了回复用户，这里保留
             await safe_reply(update, f"查询失败: {e}")
+            raise e
         finally:
             if page: await page.close()
 
 # 日报逻辑
+@log_interaction # ✅ 应用装饰器
 async def get_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log_user_action(update, "CalcBot", "Daily Digest")
+    # log_user_action 已被装饰器接管
     await safe_reply(update, "☕️ 正在搜集新闻并生成简报...")
     entries = []
     try:
@@ -343,6 +386,8 @@ def do_calc(text):
 
 def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
     token_end = app_instance.bot.token[-4:]
+    
+    @log_interaction # ✅ 应用装饰器
     async def start(u, c):
         await safe_reply(u, f"🤖 工兵 #{bot_index} ({token_end}) 就绪。")
 
@@ -370,11 +415,13 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
         app_instance.add_handler(MessageHandler(filters.Regex(GLOBAL_VIDEO_PATTERN), lambda u,c: send_global_media(u,c,True)))
 
 def setup_calculator_bot(app_instance: Application) -> None:
+    @log_interaction # ✅ 应用装饰器
     async def start(u, c):
         await safe_reply(u, "👋 我是智能计算器。\n功能：计算、新股、日报、/book、/quote")
     
     app_instance.add_handler(CommandHandler("start", start))
     
+    @log_interaction # ✅ 应用装饰器
     async def book(u,c): 
         q = " ".join(c.args)
         if not q: return await safe_reply(u, "请加关键词")
@@ -382,6 +429,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
         ai_text = await call_gemini(f"推荐3本关于{q}的书，带理由和摘抄")
         await safe_reply(u, ai_text, parse_mode='Markdown')
     
+    @log_interaction # ✅ 应用装饰器
     async def quote(u,c): 
         q = " ".join(c.args)
         t = f"《{q}》" if q else "名著"
@@ -389,6 +437,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
         ai_text = await call_gemini(f"从{t}找一段经典摘抄并赏析")
         await safe_reply(u, ai_text, parse_mode='Markdown')
     
+    @log_interaction # ✅ 应用装饰器
     async def deep(u,c): 
         q = " ".join(c.args)
         if not q: return await safe_reply(u, "请加话题")
@@ -403,11 +452,12 @@ def setup_calculator_bot(app_instance: Application) -> None:
     app_instance.add_handler(MessageHandler(filters.Regex(IPO_COMMAND_PATTERN), get_ipo_info))
     app_instance.add_handler(MessageHandler(filters.Regex(DIGEST_COMMAND_PATTERN), get_daily_digest))
 
+    @log_interaction # ✅ 应用装饰器
     async def calc(u,c):
         if not u.message.text or u.message.text.startswith("/"): return
         res = do_calc(u.message.text)
         if res: 
-            log_user_action(u, "CalcBot", f"Calc: {u.message.text}")
+            # log_user_action 已被装饰器接管
             await safe_reply(u, f"🔢 {res}")
 
     app_instance.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, calc))
@@ -417,7 +467,6 @@ def setup_calculator_bot(app_instance: Application) -> None:
 # ==============================================================================
 app = FastAPI()
 
-# 🔥 修改点2：添加根路由，通过 Render 的健康检查
 @app.get("/")
 async def root():
     return {"status": "ok", "msg": "Bot Service is Running (Shield Mode)"}
@@ -489,7 +538,7 @@ async def startup_event():
                 
                 await bot.start()
                 
-                # 🔥🔥🔥 修改点3：工兵的防冲突盾牌 🔥🔥🔥
+                # 🔥🔥🔥 工兵的防冲突盾牌 🔥🔥🔥
                 try:
                     await bot.updater.start_polling(drop_pending_updates=True)
                     logger.info(f"✅ Worker {i} Started Polling")
@@ -518,7 +567,7 @@ async def startup_event():
                 setup_calculator_bot(c_bot)
                 await c_bot.start()
                 
-                # 🔥🔥🔥 修改点4：计算器的防冲突盾牌 🔥🔥🔥
+                # 🔥🔥🔥 计算器的防冲突盾牌 🔥🔥🔥
                 try:
                     await c_bot.updater.start_polling(drop_pending_updates=True)
                     logger.info(f"✅ Calc Bot Started Polling")
