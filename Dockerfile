@@ -23,8 +23,9 @@ COPY . .
 # 逼迫 Bot 只能用 Docker 里刚装好的全新环境
 RUN rm -rf /app/pw-browsers /app/venv /app/.venv /app/.env /app/__pycache__
 
-# 8. 端口
+# 8. 端口 (EXPOSE 只是给人看的注释，写不写都行，保留着也无妨)
 EXPOSE 10000
 
 # 9. 启动
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
+# 重点在这里：用 ${PORT:-10000} 让 Render 决定端口
+CMD sh -c "uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000}"
