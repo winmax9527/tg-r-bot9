@@ -125,14 +125,24 @@ def log_interaction(func):
             logger.error(f"❌[{bot_username}] -> 执行出错: {e}", exc_info=True)
             raise e
     return wrapper
-
+    
 async def safe_reply(update: Update, text: str, parse_mode=None):
     try:
-        if parse_mode: await update.message.reply_text(text, parse_mode=parse_mode)
-        else: await update.message.reply_text(text)
+        # 1. 第一次尝试：按要求的格式（Markdown/HTML）发送
+        if parse_mode: 
+            await update.message.reply_text(text, parse_mode=parse_mode)
+        else: 
+            await update.message.reply_text(text)
     except BadRequest as e:
-        logger.warning(f"Reply failed: {e}")
-    except Exception: pass
+        # 2. 如果报错说格式不对 (Can't parse entities)
+        logger.warning(f"Reply failed with {parse_mode}: {e} -> ⚠️ 正在降级为纯文本重发...")
+        try:
+            # 3. 【关键补救】：去掉 parse_mode，以纯文本方式再发一次！
+            await update.message.reply_text(text)
+        except Exception as e2:
+            logger.error(f"Retry failed: {e2}")
+    except Exception as e:
+        logger.error(f"General Reply Error: {e}")
 
 # ==============================================================================
 # 4. 工兵逻辑
