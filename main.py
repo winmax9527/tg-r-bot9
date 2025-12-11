@@ -45,7 +45,7 @@ BOT_ALLOWED_CHATS: Dict[str, List[str]] = {}
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 GLOBAL_HTTP_CLIENT: httpx.AsyncClient | None = None
-BROWSER_LOCK = asyncio.Semaphore(1)
+BROWSER_LOCK = asyncio.Semaphore(3)
 
 # RSS 源
 DEFAULT_RSS_FEEDS = [
@@ -531,13 +531,20 @@ async def startup_event():
                 
                 await bot.start()
                 
-                try:
-                    await bot.updater.start_polling(drop_pending_updates=True)
-                    logger.info(f"✅ Worker {i} Started Polling")
-                except Conflict:
-                    logger.warning(f"🛡️ 触发盾牌: Worker {i} 遇到 Conflict (正常)，等待旧实例退出...")
-                except Exception as e:
-                    logger.error(f"❌ Worker {i} Polling Error: {e}")
+                for attempt in range(max_retries):
+                    try:
+                        await bot.updater.start_polling(drop_pending_updates=True)
+                        logger.info(f"✅ Worker {i} Started Polling (尝试 {attempt+1}/{max_retries})")
+                        break  # 成功连接，跳出循环
+                    except Conflict:
+                        logger.warning(f"🛡️ 冲突 (Worker {i}): 旧容器还在，等待释放 Token... ({retry_interval}s后重试)")
+                        await asyncio.sleep(retry_interval)
+                    except Exception as e:
+                        logger.error(f"❌ Worker {i} Polling Error: {e}")
+                        break
+                else:
+                    # 只有当循环跑完10次都没 break 时才会执行这里
+                    logger.critical(f"🛑 Worker {i} 彻底启动失败！Token 可能被其他程序长期占用。")
 
                 active_tokens.add(token)
             except Exception as e:
