@@ -45,7 +45,7 @@ BOT_ALLOWED_CHATS: Dict[str, List[str]] = {}
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 GLOBAL_HTTP_CLIENT: httpx.AsyncClient | None = None
-BROWSER_LOCK = asyncio.Semaphore(2)
+BROWSER_LOCK = asyncio.Semaphore(3)
 
 # RSS 源
 DEFAULT_RSS_FEEDS = [
