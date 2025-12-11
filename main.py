@@ -202,8 +202,17 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context_p = await browser.new_context(user_agent=user_agent)
             page = await context_p.new_page()
             
+            context_p = await browser.new_context(user_agent=user_agent)
+            page = await context_p.new_page()
+
+            # 🔥🔥🔥 新增优化：拦截垃圾请求，只看 HTML，不看图片和样式 🔥🔥🔥
+            await page.route("**/*", lambda route: route.abort() 
+                if route.request.resource_type in ["image", "media", "font", "stylesheet"] 
+                else route.continue_())
+            
             try:
-                await page.goto(domain_a, wait_until="networkidle", timeout=25000)
+                # 注意：如果不加载资源，networkidle 可能不准确，建议改用 domcontentloaded 会更快
+                await page.goto(domain_a, wait_until="domcontentloaded", timeout=25000)
             except Exception:
                 pass
 
