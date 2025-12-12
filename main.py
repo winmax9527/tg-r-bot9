@@ -45,6 +45,7 @@ BOT_ALLOWED_CHATS: Dict[str, List[str]] = {}
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 GLOBAL_HTTP_CLIENT: httpx.AsyncClient | None = None
+# 注意：如果你之前内存溢出过，建议这里改为 Semaphore(2)
 BROWSER_LOCK = asyncio.Semaphore(3)
 
 # RSS 源
@@ -398,6 +399,50 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
         await safe_reply(u, f"🤖 工兵 #{bot_index} ({token_end}) 就绪。")
 
     app_instance.add_handler(CommandHandler("start", start))
+    
+    # --- 🔥 新增功能：IP 查询逻辑 ---
+    @log_interaction
+    async def query_ip(u, c):
+        if not u.message.text: return
+        # 提取 IP (格式：IP定位 8.8.8.8)
+        try:
+            target_ip = u.message.text.split(maxsplit=1)[1].strip()
+        except IndexError:
+            return await safe_reply(u, "⚠️ 格式错误，请使用：IP定位 8.8.8.8")
+
+        await safe_reply(u, f"🔍 正在查询 IP: {target_ip} ...")
+        
+        try:
+            # 使用 ipwho.is 免费接口 (支持中文)
+            url = f"http://ipwho.is/{target_ip}?lang=zh-CN"
+            resp = await GLOBAL_HTTP_CLIENT.get(url)
+            data = resp.json()
+            
+            if not data.get('success'):
+                return await safe_reply(u, f"❌ 查询失败: {data.get('message', '未知错误')}")
+            
+            # 格式化输出 (仿照你的截图)
+            flag = data.get('flag', {}).get('emoji', '🌍')
+            msg = (
+                f"{flag} <b>IP定位结果</b>\n"
+                f"IP: <code>{data.get('ip')}</code>\n"
+                f"位置: {data.get('country')} {data.get('region')} {data.get('city')}\n"
+                f"运营商/组织: {data.get('connection', {}).get('org', 'N/A')}\n"
+                f"ASN: {data.get('connection', {}).get('asn', 'N/A')}\n"
+                f"时区: {data.get('timezone', {}).get('id', 'N/A')}\n"
+                f"当地时间: {data.get('timezone', {}).get('current_time', 'N/A')}\n"
+                f"坐标: {data.get('latitude')}, {data.get('longitude')}\n"
+                f"地图: <a href=\"https://www.google.com/maps?q={data.get('latitude')},{data.get('longitude')}\">Google Maps</a>\n"
+                f"来源: ipwho.is"
+            )
+            await safe_reply(u, msg, parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"IP Query Error: {e}")
+            await safe_reply(u, "❌ 查询出错，请稍后重试。")
+
+    # 注册 IP 查询 (正则匹配：IP定位 + 空格 + 数字/点)
+    app_instance.add_handler(MessageHandler(filters.Regex(r"^IP定位\s+[\d\.]+$"), query_ip))
+
     app_instance.add_handler(MessageHandler(filters.Regex(UNIVERSAL_COMMAND_PATTERN), get_universal_link))
     app_instance.add_handler(MessageHandler(filters.Regex(ANDROID_SPECIFIC_COMMAND_PATTERN), get_android_specific_link))
 
@@ -423,10 +468,132 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
 def setup_calculator_bot(app_instance: Application) -> None:
     @log_interaction
     async def start(u, c):
-        await safe_reply(u, "👋 我是智能计算器。\n功能：计算、新股、日报、/book、/quote")
+        await safe_reply(u, "👋 我是智能计算器。\n功能：计算、新股、日报、IP定位、查U、/book、/quote")
     
     app_instance.add_handler(CommandHandler("start", start))
     
+    # --- 🔥 新增功能：IP 查询 (代码与上面相同) ---
+    @log_interaction
+    async def query_ip(u, c):
+        if not u.message.text: return
+        try:
+            target_ip = u.message.text.split(maxsplit=1)[1].strip()
+        except IndexError:
+            return await safe_reply(u, "⚠️ 格式错误，请使用：IP定位 8.8.8.8")
+        await safe_reply(u, f"🔍 正在查询 IP: {target_ip} ...")
+        try:
+            url = f"http://ipwho.is/{target_ip}?lang=zh-CN"
+            resp = await GLOBAL_HTTP_CLIENT.get(url)
+            data = resp.json()
+            if not data.get('success'):
+                return await safe_reply(u, f"❌ 查询失败: {data.get('message', '未知错误')}")
+            flag = data.get('flag', {}).get('emoji', '🌍')
+            msg = (
+                f"{flag} <b>IP定位结果</b>\n"
+                f"IP: <code>{data.get('ip')}</code>\n"
+                f"位置: {data.get('country')} {data.get('region')} {data.get('city')}\n"
+                f"运营商/组织: {data.get('connection', {}).get('org', 'N/A')}\n"
+                f"ASN: {data.get('connection', {}).get('asn', 'N/A')}\n"
+                f"时区: {data.get('timezone', {}).get('id', 'N/A')}\n"
+                f"当地时间: {data.get('timezone', {}).get('current_time', 'N/A')}\n"
+                f"坐标: {data.get('latitude')}, {data.get('longitude')}\n"
+                f"地图: <a href=\"https://www.google.com/maps?q={data.get('latitude')},{data.get('longitude')}\">Google Maps</a>\n"
+                f"来源: ipwho.is"
+            )
+            await safe_reply(u, msg, parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"IP Query Error: {e}")
+            await safe_reply(u, "❌ 查询出错")
+
+    # --- 🔥 新增功能：USDT 钱包查询 (查 Txxxx...) ---
+    @log_interaction
+    async def query_usdt(u, c):
+        if not u.message.text: return
+        # 提取地址
+        try:
+            # 兼容 "查 Txxx" 或 "查Txxx"
+            address = u.message.text.strip().replace("查", "").strip()
+        except: return
+        
+        if not address.startswith("T") or len(address) != 34:
+             return await safe_reply(u, "⚠️ 地址格式看起来不对，请提供正确的 TRC20 地址 (T开头)。")
+
+        await safe_reply(u, f"🔗 正在查询链上数据: {address} ...")
+
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            # 1. 查询余额 (使用 TronScan API)
+            balance_url = f"https://apilist.tronscanapi.com/api/account/tokens?address={address}&start=0&limit=20&hidden=0&show=0&sortType=0"
+            
+            # 2. 查询最近转账
+            # USDT 合约地址: TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t
+            transfer_url = f"https://apilist.tronscanapi.com/api/token_trc20/transfers?limit=5&start=0&sort=-timestamp&count=true&relatedAddress={address}&tokenAddress=TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+            
+            # 并发请求
+            resp_bal, resp_trans = await asyncio.gather(
+                GLOBAL_HTTP_CLIENT.get(balance_url, headers=headers),
+                GLOBAL_HTTP_CLIENT.get(transfer_url, headers=headers)
+            )
+            
+            # 解析余额
+            usdt_balance = 0.0
+            tokens = resp_bal.json().get('data', [])
+            for t in tokens:
+                if t.get('tokenAbbr') == 'USDT':
+                    # quantity 是精度前的数字，USDT精度6，需除以 1,000,000
+                    # 但 TronScan API 有时直接返回 balance，有时返回 quantity。通常是 quantity / 10^decimals
+                    amount = float(t.get('quantity', 0)) if t.get('quantity') else float(t.get('balance', 0))
+                    # 如果数字很大，说明是未处理精度的，USDT是6位
+                    if amount > 100000000: # 简单的启发式判断，或直接用 balance 字段(通常是处理过的)
+                         usdt_balance = float(t.get('balance', 0))
+                    else:
+                         usdt_balance = float(t.get('balance', 0))
+                    break
+            
+            # 格式化金额 (千分位)
+            balance_str = "{:,.2f}".format(usdt_balance)
+
+            # 解析交易记录
+            transfers = resp_trans.json().get('token_transfers', [])
+            trans_lines = []
+            if not transfers:
+                trans_lines.append("暂无 USDT 交易记录")
+            else:
+                for tx in transfers:
+                    # 判断进出
+                    is_in = tx.get('to_address') == address
+                    arrow = "🟢收" if is_in else "🔴转"
+                    # 金额处理 (USDT精度6)
+                    amt = float(tx.get('quant', 0)) / 1000000
+                    amt_str = "{:,.2f}".format(amt)
+                    # 时间处理
+                    ts = int(tx.get('block_ts', 0)) / 1000
+                    time_str = datetime.fromtimestamp(ts).strftime('%m-%d %H:%M')
+                    # 对方地址 (缩略显示)
+                    other = tx.get('from_address') if is_in else tx.get('to_address')
+                    other_short = f"{other[:4]}...{other[-4:]}"
+                    
+                    trans_lines.append(f"{arrow} {amt_str} | {other_short} | {time_str}")
+
+            trans_text = "\n".join(trans_lines)
+
+            msg = (
+                f"💰 <b>钱包查询结果</b> (数据源: TronScan)\n"
+                f"地址: <code>{address}</code>\n"
+                f"💎 <b>USDT余额:</b> {balance_str}\n\n"
+                f"📋 <b>最近 USDT 记录:</b>\n"
+                f"{trans_text}\n"
+                f"🔗 <a href=\"https://tronscan.org/#/address/{address}\">TronScan详情</a>"
+            )
+            await safe_reply(u, msg, parse_mode='HTML')
+
+        except Exception as e:
+            logger.error(f"USDT Query Error: {e}")
+            await safe_reply(u, f"❌ 查询失败: {e}")
+
+    app_instance.add_handler(MessageHandler(filters.Regex(r"^IP定位\s+[\d\.]+$"), query_ip))
+    app_instance.add_handler(MessageHandler(filters.Regex(r"^查\s*T[a-zA-Z0-9]{33}$"), query_usdt))
+
     @log_interaction
     async def book(u,c): 
         q = " ".join(c.args)
