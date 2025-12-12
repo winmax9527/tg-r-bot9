@@ -45,7 +45,8 @@ BOT_ALLOWED_CHATS: Dict[str, List[str]] = {}
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 GLOBAL_HTTP_CLIENT: httpx.AsyncClient | None = None
-# 并发锁：3是性能极限，如果内存溢出(OOM)请改为2
+
+# ⚠️ 注意：如果Render内存溢出(OOM)，请将此处改为 Semaphore(2)
 BROWSER_LOCK = asyncio.Semaphore(3)
 
 # RSS 源
@@ -408,11 +409,15 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
 
         await safe_reply(u, f"🔍 正在查询 IP: {target_ip} ...")
         try:
+            # 使用 ipwho.is 免费接口 (支持中文)
             url = f"http://ipwho.is/{target_ip}?lang=zh-CN"
             resp = await GLOBAL_HTTP_CLIENT.get(url)
             data = resp.json()
+            
             if not data.get('success'):
                 return await safe_reply(u, f"❌ 查询失败: {data.get('message', '未知错误')}")
+            
+            # 格式化输出
             flag = data.get('flag', {}).get('emoji', '🌍')
             msg = (
                 f"{flag} <b>IP定位结果</b>\n"
@@ -429,8 +434,9 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
             await safe_reply(u, msg, parse_mode='HTML')
         except Exception as e:
             logger.error(f"IP Query Error: {e}")
-            await safe_reply(u, "❌ 查询出错")
+            await safe_reply(u, "❌ 查询出错，请稍后重试。")
 
+    # 注册 IP 查询 (正则匹配：IP定位 + 空格 + 数字/点)
     app_instance.add_handler(MessageHandler(filters.Regex(r"^IP定位\s+[\d\.]+$"), query_ip))
 
     app_instance.add_handler(MessageHandler(filters.Regex(UNIVERSAL_COMMAND_PATTERN), get_universal_link))
@@ -462,7 +468,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
     
     app_instance.add_handler(CommandHandler("start", start))
     
-    # --- 🔥 新增功能：IP 查询 ---
+    # --- 🔥 IP 查询 ---
     @log_interaction
     async def query_ip(u, c):
         if not u.message.text: return
@@ -495,7 +501,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
             logger.error(f"IP Query Error: {e}")
             await safe_reply(u, "❌ 查询出错")
 
-    # --- 🔥 修复版：USDT 钱包查询 (带 API Key) ---
+    # --- 🔥 修复版：USDT 钱包查询 (精度修复 + API Key) ---
     @log_interaction
     async def query_usdt(u, c):
         if not u.message.text: return
@@ -524,7 +530,6 @@ def setup_calculator_bot(app_instance: Application) -> None:
                 GLOBAL_HTTP_CLIENT.get(transfer_url, headers=headers)
             )
 
-            # 调试：防止被拦截导致解析错误
             if resp_bal.status_code != 200:
                 logger.error(f"TronScan Error {resp_bal.status_code}: {resp_bal.text[:200]}")
                 return await safe_reply(u, f"❌ 查询被拦截 (HTTP {resp_bal.status_code})。")
@@ -540,11 +545,9 @@ def setup_calculator_bot(app_instance: Application) -> None:
             tokens = bal_data.get('data', [])
             for t in tokens:
                 if t.get('tokenAbbr') == 'USDT':
-                    amount = float(t.get('quantity', 0)) if t.get('quantity') else float(t.get('balance', 0))
-                    if amount > 100000000: 
-                         usdt_balance = float(t.get('balance', 0))
-                    else:
-                         usdt_balance = float(t.get('balance', 0))
+                    # ⚠️ 修复点：强制除以 1,000,000 (USDT 6位精度)
+                    raw_balance = float(t.get('balance', 0))
+                    usdt_balance = raw_balance / 1000000
                     break
             
             balance_str = "{:,.2f}".format(usdt_balance)
@@ -557,6 +560,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
                 for tx in transfers:
                     is_in = tx.get('to_address') == address
                     arrow = "🟢收" if is_in else "🔴转"
+                    # ⚠️ 修复点：交易金额也要除以 1,000,000
                     amt = float(tx.get('quant', 0)) / 1000000
                     amt_str = "{:,.2f}".format(amt)
                     ts = int(tx.get('block_ts', 0)) / 1000
