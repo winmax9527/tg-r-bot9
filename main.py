@@ -45,7 +45,7 @@ BOT_ALLOWED_CHATS: Dict[str, List[str]] = {}
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 GLOBAL_HTTP_CLIENT: httpx.AsyncClient | None = None
-# 注意：如果你之前内存溢出过，建议这里改为 Semaphore(2)
+# 并发锁：3是性能极限，如果内存溢出(OOM)请改为2
 BROWSER_LOCK = asyncio.Semaphore(3)
 
 # RSS 源
@@ -203,16 +203,13 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context_p = await browser.new_context(user_agent=user_agent)
             page = await context_p.new_page()
             
-            context_p = await browser.new_context(user_agent=user_agent)
-            page = await context_p.new_page()
-
-            # 🔥🔥🔥 新增优化：拦截垃圾请求，只看 HTML，不看图片和样式 🔥🔥🔥
+            # 🔥🔥🔥 优化：拦截垃圾请求，只看 HTML，不看图片和样式 🔥🔥🔥
             await page.route("**/*", lambda route: route.abort() 
                 if route.request.resource_type in ["image", "media", "font", "stylesheet"] 
                 else route.continue_())
             
             try:
-                # 注意：如果不加载资源，networkidle 可能不准确，建议改用 domcontentloaded 会更快
+                # 极速模式：domcontentloaded
                 await page.goto(domain_a, wait_until="domcontentloaded", timeout=25000)
             except Exception:
                 pass
@@ -284,7 +281,7 @@ async def call_gemini(prompt: str, model: str = "gemini-2.5-flash") -> str:
         return f"AI Error: {resp.status_code}"
     except Exception as e: return f"Net Error: {e}"
 
-# 新股逻辑 (🔥 已修复：过滤多余表头行)
+# 新股逻辑
 @log_interaction
 async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not BROWSER_INSTANCE: return await safe_reply(update, "❌ 浏览器未就绪")
@@ -320,7 +317,6 @@ async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if rows_data:
                 for item in rows_data:
-                    # 🔥 核心修改：如果代码这一栏包含“代码”两个字，说明是表头垃圾，跳过！
                     if "代码" in item['code'] or "简称" in item['name']:
                         continue
                     
@@ -411,17 +407,12 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
             return await safe_reply(u, "⚠️ 格式错误，请使用：IP定位 8.8.8.8")
 
         await safe_reply(u, f"🔍 正在查询 IP: {target_ip} ...")
-        
         try:
-            # 使用 ipwho.is 免费接口 (支持中文)
             url = f"http://ipwho.is/{target_ip}?lang=zh-CN"
             resp = await GLOBAL_HTTP_CLIENT.get(url)
             data = resp.json()
-            
             if not data.get('success'):
                 return await safe_reply(u, f"❌ 查询失败: {data.get('message', '未知错误')}")
-            
-            # 格式化输出 (仿照你的截图)
             flag = data.get('flag', {}).get('emoji', '🌍')
             msg = (
                 f"{flag} <b>IP定位结果</b>\n"
@@ -438,9 +429,8 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
             await safe_reply(u, msg, parse_mode='HTML')
         except Exception as e:
             logger.error(f"IP Query Error: {e}")
-            await safe_reply(u, "❌ 查询出错，请稍后重试。")
+            await safe_reply(u, "❌ 查询出错")
 
-    # 注册 IP 查询 (正则匹配：IP定位 + 空格 + 数字/点)
     app_instance.add_handler(MessageHandler(filters.Regex(r"^IP定位\s+[\d\.]+$"), query_ip))
 
     app_instance.add_handler(MessageHandler(filters.Regex(UNIVERSAL_COMMAND_PATTERN), get_universal_link))
@@ -472,7 +462,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
     
     app_instance.add_handler(CommandHandler("start", start))
     
-    # --- 🔥 新增功能：IP 查询 (代码与上面相同) ---
+    # --- 🔥 新增功能：IP 查询 ---
     @log_interaction
     async def query_ip(u, c):
         if not u.message.text: return
@@ -505,74 +495,74 @@ def setup_calculator_bot(app_instance: Application) -> None:
             logger.error(f"IP Query Error: {e}")
             await safe_reply(u, "❌ 查询出错")
 
-    # --- 🔥 新增功能：USDT 钱包查询 (查 Txxxx...) ---
+    # --- 🔥 修复版：USDT 钱包查询 (带 API Key) ---
     @log_interaction
     async def query_usdt(u, c):
         if not u.message.text: return
-        # 提取地址
         try:
-            # 兼容 "查 Txxx" 或 "查Txxx"
             address = u.message.text.strip().replace("查", "").strip()
         except: return
         
         if not address.startswith("T") or len(address) != 34:
-             return await safe_reply(u, "⚠️ 地址格式看起来不对，请提供正确的 TRC20 地址 (T开头)。")
+             return await safe_reply(u, "⚠️ 地址格式不对，请输入正确的 TRC20 地址。")
 
         await safe_reply(u, f"🔗 正在查询链上数据: {address} ...")
 
         try:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            # 1. 查询余额 (使用 TronScan API)
-            balance_url = f"https://apilist.tronscanapi.com/api/account/tokens?address={address}&start=0&limit=20&hidden=0&show=0&sortType=0"
+            # 读取 API Key
+            api_key = os.getenv("TRONSCAN_API_KEY", "")
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "TRON-PRO-API-KEY": api_key 
+            }
             
-            # 2. 查询最近转账
-            # USDT 合约地址: TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t
+            balance_url = f"https://apilist.tronscanapi.com/api/account/tokens?address={address}&start=0&limit=20&hidden=0&show=0&sortType=0"
             transfer_url = f"https://apilist.tronscanapi.com/api/token_trc20/transfers?limit=5&start=0&sort=-timestamp&count=true&relatedAddress={address}&tokenAddress=TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
             
-            # 并发请求
             resp_bal, resp_trans = await asyncio.gather(
                 GLOBAL_HTTP_CLIENT.get(balance_url, headers=headers),
                 GLOBAL_HTTP_CLIENT.get(transfer_url, headers=headers)
             )
+
+            # 调试：防止被拦截导致解析错误
+            if resp_bal.status_code != 200:
+                logger.error(f"TronScan Error {resp_bal.status_code}: {resp_bal.text[:200]}")
+                return await safe_reply(u, f"❌ 查询被拦截 (HTTP {resp_bal.status_code})。")
+
+            try:
+                bal_data = resp_bal.json()
+                trans_data = resp_trans.json()
+            except Exception as e:
+                logger.error(f"JSON Parse Error. Body: {resp_bal.text[:200]}")
+                return await safe_reply(u, "❌ TronScan 返回了非 JSON 数据。")
             
-            # 解析余额
             usdt_balance = 0.0
-            tokens = resp_bal.json().get('data', [])
+            tokens = bal_data.get('data', [])
             for t in tokens:
                 if t.get('tokenAbbr') == 'USDT':
-                    # quantity 是精度前的数字，USDT精度6，需除以 1,000,000
-                    # 但 TronScan API 有时直接返回 balance，有时返回 quantity。通常是 quantity / 10^decimals
                     amount = float(t.get('quantity', 0)) if t.get('quantity') else float(t.get('balance', 0))
-                    # 如果数字很大，说明是未处理精度的，USDT是6位
-                    if amount > 100000000: # 简单的启发式判断，或直接用 balance 字段(通常是处理过的)
+                    if amount > 100000000: 
                          usdt_balance = float(t.get('balance', 0))
                     else:
                          usdt_balance = float(t.get('balance', 0))
                     break
             
-            # 格式化金额 (千分位)
             balance_str = "{:,.2f}".format(usdt_balance)
 
-            # 解析交易记录
-            transfers = resp_trans.json().get('token_transfers', [])
+            transfers = trans_data.get('token_transfers', [])
             trans_lines = []
             if not transfers:
                 trans_lines.append("暂无 USDT 交易记录")
             else:
                 for tx in transfers:
-                    # 判断进出
                     is_in = tx.get('to_address') == address
                     arrow = "🟢收" if is_in else "🔴转"
-                    # 金额处理 (USDT精度6)
                     amt = float(tx.get('quant', 0)) / 1000000
                     amt_str = "{:,.2f}".format(amt)
-                    # 时间处理
                     ts = int(tx.get('block_ts', 0)) / 1000
                     time_str = datetime.fromtimestamp(ts).strftime('%m-%d %H:%M')
-                    # 对方地址 (缩略显示)
                     other = tx.get('from_address') if is_in else tx.get('to_address')
                     other_short = f"{other[:4]}...{other[-4:]}"
-                    
                     trans_lines.append(f"{arrow} {amt_str} | {other_short} | {time_str}")
 
             trans_text = "\n".join(trans_lines)
