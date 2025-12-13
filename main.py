@@ -69,8 +69,10 @@ ANDROID_TAB_LIMIT_PATTERN = r"^(安卓窗口上限|窗口上限|标签上限)$"
 IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
 IPO_COMMAND_PATTERN = r"^(新股|新股申购|新股上市|近期新股|申购|上市)$"
 DIGEST_COMMAND_PATTERN = r"^(日报|简报|新闻|每日简报|科技新闻)$"
-# 🔥 新增 IP 正则：匹配 "1.1.1.1" 或 "查 1.1.1.1" 或 "IP定位 1.1.1.1"
-IP_QUERY_PATTERN = r"^(?:查\s*|IP定位\s*)?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$"
+
+# 🔥【重点修复】IP 正则：兼容 IPv4 (数字+点) 和 IPv6 (十六进制+冒号)
+# 允许的字符：数字、字母a-f、点、冒号
+IP_QUERY_PATTERN = r"^(?:查\s*|IP定位\s*)?([0-9a-fA-F:.]+)$"
 
 GLOBAL_IMAGE_MAP: Dict[str, str] = {}
 GLOBAL_IMAGE_PATTERN: str = ""
@@ -399,19 +401,19 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
 
     app_instance.add_handler(CommandHandler("start", start))
     
-    # --- 🔥 IP 查询 (支持直接发IP) ---
+    # --- 🔥 IP 查询 (支持 IPv4 和 IPv6) ---
     @log_interaction
     async def query_ip(u, c):
         if not u.message.text: return
-        # 正则已经帮我们提取了IP，在 context.match 或者是直接解析文本
+        # 获取消息文本
         text = u.message.text.strip()
-        # 简单清洗：把 "查" 或 "IP定位" 去掉，只留 IP
+        # 清洗指令，只保留IP部分
         target_ip = re.sub(r"^(查|IP定位)\s*", "", text).strip()
 
         await safe_reply(u, f"🔍 正在查询 IP: {target_ip} ...")
         
         try:
-            # 使用 ipwho.is 免费接口 (支持中文)
+            # 使用 ipwho.is (支持 IPv6)
             url = f"http://ipwho.is/{target_ip}?lang=zh-CN"
             resp = await GLOBAL_HTTP_CLIENT.get(url)
             data = resp.json()
@@ -469,7 +471,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
     
     app_instance.add_handler(CommandHandler("start", start))
     
-    # --- 🔥 IP 查询 (支持直接发IP) ---
+    # --- 🔥 IP 查询 (支持 IPv4 和 IPv6) ---
     @log_interaction
     async def query_ip(u, c):
         if not u.message.text: return
@@ -501,7 +503,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
             logger.error(f"IP Query Error: {e}")
             await safe_reply(u, "❌ 查询出错")
 
-    # --- 🔥 USDT 查询 (终极对齐版) ---
+    # --- 🔥 USDT 查询 ---
     @log_interaction
     async def query_usdt(u, c):
         if not u.message.text: return
@@ -629,18 +631,34 @@ def setup_calculator_bot(app_instance: Application) -> None:
     app_instance.add_handler(CommandHandler("book", book))
     app_instance.add_handler(CommandHandler("quote", quote))
     app_instance.add_handler(CommandHandler("deep", deep))
-
     app_instance.add_handler(MessageHandler(filters.Regex(IPO_COMMAND_PATTERN), get_ipo_info))
     app_instance.add_handler(MessageHandler(filters.Regex(DIGEST_COMMAND_PATTERN), get_daily_digest))
 
+    # --- 🔥 计算器升级：支持回复连续计算 + 兼容 / 开头 ---
     @log_interaction
     async def calc(u,c):
-        if not u.message.text or u.message.text.startswith("/"): return
-        res = do_calc(u.message.text)
-        if res: 
+        text = u.message.text
+        if not text: return
+        
+        # 1. 尝试 "引用回复" 连续计算
+        if u.message.reply_to_message and u.message.reply_to_message.text:
+            prev_msg = u.message.reply_to_message.text
+            match = re.search(r'🔢\s*([0-9\.]+)', prev_msg.replace(',', ''))
+            if match:
+                prev_num = match.group(1)
+                if text.strip()[0] in ['+', '-', '*', '/']:
+                    combined_text = f"{prev_num}{text.strip()}"
+                    res = do_calc(combined_text)
+                    if res is not None:
+                        await safe_reply(u, f"🔢 {res}")
+                        return
+
+        # 2. 普通计算 (不再拦截 / 开头)
+        res = do_calc(text)
+        if res is not None: 
             await safe_reply(u, f"🔢 {res}")
 
-    app_instance.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, calc))
+    app_instance.add_handler(MessageHandler(filters.TEXT | filters.COMMAND, calc))
 
 # ==============================================================================
 # 7. 启动
@@ -682,7 +700,7 @@ async def startup_event():
             for key in k.split(','): GLOBAL_VIDEO_MAP[key.strip()] = v
             
     if GLOBAL_IMAGE_MAP: GLOBAL_IMAGE_PATTERN = r"^(" + "|".join([re.escape(k) for k in GLOBAL_IMAGE_MAP.keys()]) + r")$"
-    if GLOBAL_VIDEO_MAP: GLOBAL_VIDEO_PATTERN = r"^(" + "|".join([re.escape(k) for k in GLOBAL_VIDEO_MAP.keys()]) + r")$"
+    if GLOBAL_VIDEO_PATTERN: GLOBAL_VIDEO_PATTERN = r"^(" + "|".join([re.escape(k) for k in GLOBAL_VIDEO_MAP.keys()]) + r")$"
 
     active_tokens = set()
 
