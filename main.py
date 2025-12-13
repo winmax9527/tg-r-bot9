@@ -70,9 +70,11 @@ IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
 IPO_COMMAND_PATTERN = r"^(新股|新股申购|新股上市|近期新股|申购|上市)$"
 DIGEST_COMMAND_PATTERN = r"^(日报|简报|新闻|每日简报|科技新闻)$"
 
-# 🔥【重点修复】IP 正则：兼容 IPv4 (数字+点) 和 IPv6 (十六进制+冒号)
-# 允许的字符：数字、字母a-f、点、冒号
-IP_QUERY_PATTERN = r"^(?:查\s*|IP定位\s*)?([0-9a-fA-F:.]+)$"
+# 🔥【智能IP正则】
+# 1. 带前缀：查 xxxx -> 宽松匹配
+# 2. 纯IP (IPv4)：必须是 x.x.x.x (防止误伤 3.14 这种小数)
+# 3. 纯IP (IPv6)：必须包含至少两个冒号 (防止误伤普通文本)
+IP_QUERY_PATTERN = r"^(?:(?:查|IP定位)\s*[0-9a-fA-F:.]+|(?:\d{1,3}\.){3}\d{1,3}|(?:[0-9a-fA-F]{0,4}:){2,}[0-9a-fA-F:.]*)$"
 
 GLOBAL_IMAGE_MAP: Dict[str, str] = {}
 GLOBAL_IMAGE_PATTERN: str = ""
@@ -379,8 +381,12 @@ async def get_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     res = await call_gemini(prompt)
     await safe_reply(update, f"📅 <b>今日科技内参</b>\n\n{res}", parse_mode='HTML')
 
-# 纯文本计算
+# 纯文本计算核心 (🔥 防呆优化版)
 def do_calc(text):
+    # 🛑 1. 如果包含冒号 (IPv6 特征)，直接忽略，不算
+    if ':' in text:
+        return None
+        
     try:
         clean = re.sub(r'[^\d\+\-\*\/\(\)\.\%]', '', text)
         if not clean: return None
@@ -401,11 +407,10 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
 
     app_instance.add_handler(CommandHandler("start", start))
     
-    # --- 🔥 IP 查询 (支持 IPv4 和 IPv6) ---
+    # --- 🔥 IP 查询 (智能正则) ---
     @log_interaction
     async def query_ip(u, c):
         if not u.message.text: return
-        # 获取消息文本
         text = u.message.text.strip()
         # 清洗指令，只保留IP部分
         target_ip = re.sub(r"^(查|IP定位)\s*", "", text).strip()
@@ -471,7 +476,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
     
     app_instance.add_handler(CommandHandler("start", start))
     
-    # --- 🔥 IP 查询 (支持 IPv4 和 IPv6) ---
+    # --- 🔥 IP 查询 ---
     @log_interaction
     async def query_ip(u, c):
         if not u.message.text: return
@@ -503,7 +508,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
             logger.error(f"IP Query Error: {e}")
             await safe_reply(u, "❌ 查询出错")
 
-    # --- 🔥 USDT 查询 ---
+    # --- 🔥 USDT 查询 (TronScan 对齐版) ---
     @log_interaction
     async def query_usdt(u, c):
         if not u.message.text: return
@@ -561,7 +566,6 @@ def setup_calculator_bot(app_instance: Application) -> None:
                 trans_lines.append("暂无近 10 笔 USDT 记录")
             else:
                 for tx in transfers:
-                    # 双重保险：再次确认 USDT
                     if tx.get('contract_address') != usdt_contract:
                         continue
 
@@ -571,7 +575,6 @@ def setup_calculator_bot(app_instance: Application) -> None:
                     amt = float(tx.get('quant', 0)) / 1000000
                     amt_str = "{:,.2f}".format(amt)
                     
-                    # 时间 (转为北京时间 UTC+8)
                     ts = int(tx.get('block_ts', 0)) / 1000
                     dt_object = datetime.fromtimestamp(ts, timezone(timedelta(hours=8)))
                     time_str = dt_object.strftime('%m-%d %H:%M')
