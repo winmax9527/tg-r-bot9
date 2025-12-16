@@ -5,7 +5,7 @@ import re
 import random
 import string
 import datetime
-from datetime import date, datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta, time
 from urllib.parse import urlparse
 from typing import List, Dict, Any
 from functools import wraps
@@ -71,9 +71,6 @@ IPO_COMMAND_PATTERN = r"^(新股|新股申购|新股上市|近期新股|申购|�
 DIGEST_COMMAND_PATTERN = r"^(日报|简报|新闻|每日简报|科技新闻)$"
 
 # 🔥【智能IP正则】
-# 1. 带前缀：查 xxxx -> 宽松匹配
-# 2. 纯IP (IPv4)：必须是 x.x.x.x (防止误伤 3.14 这种小数)
-# 3. 纯IP (IPv6)：必须包含至少两个冒号 (防止误伤普通文本)
 IP_QUERY_PATTERN = r"^(?:(?:查|IP定位)\s*[0-9a-fA-F:.]+|(?:\d{1,3}\.){3}\d{1,3}|(?:[0-9a-fA-F]{0,4}:){2,}[0-9a-fA-F:.]*)$"
 
 GLOBAL_IMAGE_MAP: Dict[str, str] = {}
@@ -136,16 +133,13 @@ def log_interaction(func):
     
 async def safe_reply(update: Update, text: str, parse_mode=None):
     try:
-        # 1. 第一次尝试：按要求的格式（Markdown/HTML）发送
         if parse_mode:
             await update.message.reply_text(text, parse_mode=parse_mode)
         else:
             await update.message.reply_text(text)
     except BadRequest as e:
-        # 2. 如果报错说格式不对 (Can't parse entities)
         logger.warning(f"Reply failed with {parse_mode}: {e} -> ⚠️ 正在降级为纯文本重发...")
         try:
-            # 3. 【关键补救】：去掉 parse_mode，以纯文本方式再发一次！
             await update.message.reply_text(text)
         except Exception as e2:
             logger.error(f"Retry failed: {e2}")
@@ -210,13 +204,11 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context_p = await browser.new_context(user_agent=user_agent)
             page = await context_p.new_page()
             
-            # 🔥🔥🔥 优化：拦截垃圾请求，只看 HTML，不看图片和样式 🔥🔥🔥
             await page.route("**/*", lambda route: route.abort() 
                 if route.request.resource_type in ["image", "media", "font", "stylesheet"] 
                 else route.continue_())
             
             try:
-                # 极速模式：domcontentloaded
                 await page.goto(domain_a, wait_until="domcontentloaded", timeout=25000)
             except Exception:
                 pass
@@ -288,11 +280,9 @@ async def call_gemini(prompt: str, model: str = "gemini-2.5-flash") -> str:
         return f"AI Error: {resp.status_code}"
     except Exception as e: return f"Net Error: {e}"
 
-# 新股逻辑
 @log_interaction
 async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not BROWSER_INSTANCE: return await safe_reply(update, "❌ 浏览器未就绪")
-    
     await safe_reply(update, "🔍 正在检索并筛选最新新股...")
     
     async with BROWSER_LOCK:
@@ -300,9 +290,7 @@ async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             page = await BROWSER_INSTANCE.new_page()
             await page.goto("https://vip.stock.finance.sina.com.cn/corp/go.php/vRPD_NewStockIssue/page/1.phtml", timeout=30000)
-            
-            try:
-                await page.wait_for_selector("#NewStockTable", state="visible", timeout=10000)
+            try: await page.wait_for_selector("#NewStockTable", state="visible", timeout=10000)
             except: pass 
 
             rows_data = await page.evaluate('''() => {
@@ -321,72 +309,86 @@ async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             valid_rows = []
             today = date.today()
-
             if rows_data:
                 for item in rows_data:
-                    if "代码" in item['code'] or "简称" in item['name']:
-                        continue
-                    
+                    if "代码" in item['code'] or "简称" in item['name']: continue
                     l_str = item['list_date']
                     keep = False
-                    if l_str == "-" or not l_str:
-                        keep = True
+                    if l_str == "-" or not l_str: keep = True
                     else:
                         try:
                             l_date = datetime.strptime(l_str, "%Y-%m-%d").date()
-                            if l_date >= today:
-                                keep = True
-                        except:
-                            keep = True
-                    if keep:
-                        valid_rows.append(item)
+                            if l_date >= today: keep = True
+                        except: keep = True
+                    if keep: valid_rows.append(item)
                 valid_rows = valid_rows[:15]
 
             if valid_rows:
                 msg_lines = ["🔔 <b>近期新股日历 (从今日起)</b>"]
                 msg_lines.append("• 证券代码 证券简称 申购日 / 上市日") 
-                
                 for item in valid_rows:
                     l_date = item['list_date'] if item['list_date'] else "-"
                     s_date = item['sub_date'] if item['sub_date'] else "-"
                     line = f"• <code>{item['code']}</code> {item['name']} {s_date} / {l_date}"
                     msg_lines.append(line)
-                
                 final_text = "\n".join(msg_lines)
                 await safe_reply(update, final_text, parse_mode='HTML')
             else:
                 await safe_reply(update, "⚠️ 近期没有待上市的新股。")
-
         except Exception as e:
             await safe_reply(update, f"查询失败: {e}")
             raise e
         finally:
             if page: await page.close()
 
-# 日报逻辑
-@log_interaction
-async def get_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await safe_reply(update, "☕️ 正在搜集新闻并生成简报...")
+# 🔥 核心：生成日报内容的函数 (抽离出来，供手动和定时调用)
+async def generate_digest_content() -> str:
     entries = []
     try:
         tasks = [asyncio.to_thread(feedparser.parse, u) for u in DEFAULT_RSS_FEEDS]
         results = await asyncio.gather(*tasks)
         for f in results: entries.extend(f.entries[:5])
-    except: pass
+    except: return "📭 获取新闻失败"
     
-    if not entries: return await safe_reply(update, "📭 无新闻更新")
+    if not entries: return "📭 无新闻更新"
     
     content = "\n".join([f"- {e.title} ({e.link})" for e in entries])
     prompt = f"你是一名资深科技主编。请从以下素材中筛选10条重要新闻，分类为AI、数码、商业、深度。用中文一句话解读。素材：\n{content}"
     res = await call_gemini(prompt)
-    await safe_reply(update, f"📅 <b>今日科技内参</b>\n\n{res}", parse_mode='HTML')
+    return f"📅 <b>今日科技内参</b>\n\n{res}"
 
-# 纯文本计算核心 (🔥 防呆优化版)
+# 手动触发日报
+@log_interaction
+async def get_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await safe_reply(update, "☕️ 正在搜集新闻并生成简报...")
+    content = await generate_digest_content()
+    await safe_reply(update, content, parse_mode='HTML')
+
+# 🔥 计算器定时任务回调
+async def auto_send_digest(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.data.get('chat_id') if context.job.data else None
+    if not chat_id: return
+    content = await generate_digest_content()
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=content, parse_mode='HTML')
+        logger.info("✅ 定时日报发送成功")
+    except Exception as e:
+        logger.error(f"❌ 定时发送失败: {e}")
+
+# 🔥🔥 【工兵Bot】定时发送回调 (恢复的逻辑) 🔥🔥
+async def send_scheduled_worker_message(context: ContextTypes.DEFAULT_TYPE):
+    # data 里面存了 {'chat_id': xxx, 'text': xxx}
+    job_data = context.job.data
+    if not job_data: return
+    try:
+        await context.bot.send_message(chat_id=job_data['chat_id'], text=job_data['text'], parse_mode='HTML')
+        logger.info(f"✅ 工兵定时消息已发送到 {job_data['chat_id']}")
+    except Exception as e:
+        logger.error(f"❌ 工兵定时消息发送失败: {e}")
+
+# 纯文本计算核心 (防呆优化版)
 def do_calc(text):
-    # 🛑 1. 如果包含冒号 (IPv6 特征)，直接忽略，不算
-    if ':' in text:
-        return None
-        
+    if ':' in text: return None
     try:
         clean = re.sub(r'[^\d\+\-\*\/\(\)\.\%]', '', text)
         if not clean: return None
@@ -400,32 +402,25 @@ def do_calc(text):
 
 def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
     token_end = app_instance.bot.token[-4:]
-    
     @log_interaction
     async def start(u, c):
         await safe_reply(u, f"🤖 工兵 #{bot_index} ({token_end}) 就绪。")
 
     app_instance.add_handler(CommandHandler("start", start))
     
-    # --- 🔥 IP 查询 (智能正则) ---
+    # IP 查询
     @log_interaction
     async def query_ip(u, c):
         if not u.message.text: return
         text = u.message.text.strip()
-        # 清洗指令，只保留IP部分
         target_ip = re.sub(r"^(查|IP定位)\s*", "", text).strip()
-
         await safe_reply(u, f"🔍 正在查询 IP: {target_ip} ...")
-        
         try:
-            # 使用 ipwho.is (支持 IPv6)
             url = f"http://ipwho.is/{target_ip}?lang=zh-CN"
             resp = await GLOBAL_HTTP_CLIENT.get(url)
             data = resp.json()
-            
             if not data.get('success'):
                 return await safe_reply(u, f"❌ 查询失败: {data.get('message', '未知错误')}")
-            
             flag = data.get('flag', {}).get('emoji', '🌍')
             msg = (
                 f"{flag} <b>IP定位结果</b>\n"
@@ -444,9 +439,7 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
             logger.error(f"IP Query Error: {e}")
             await safe_reply(u, "❌ 查询出错，请稍后重试。")
 
-    # 注册 IP 查询 (使用新正则)
     app_instance.add_handler(MessageHandler(filters.Regex(IP_QUERY_PATTERN), query_ip))
-
     app_instance.add_handler(MessageHandler(filters.Regex(UNIVERSAL_COMMAND_PATTERN), get_universal_link))
     app_instance.add_handler(MessageHandler(filters.Regex(ANDROID_SPECIFIC_COMMAND_PATTERN), get_android_specific_link))
 
@@ -476,13 +469,11 @@ def setup_calculator_bot(app_instance: Application) -> None:
     
     app_instance.add_handler(CommandHandler("start", start))
     
-    # --- 🔥 IP 查询 ---
     @log_interaction
     async def query_ip(u, c):
         if not u.message.text: return
         text = u.message.text.strip()
         target_ip = re.sub(r"^(查|IP定位)\s*", "", text).strip()
-        
         await safe_reply(u, f"🔍 正在查询 IP: {target_ip} ...")
         try:
             url = f"http://ipwho.is/{target_ip}?lang=zh-CN"
@@ -508,31 +499,20 @@ def setup_calculator_bot(app_instance: Application) -> None:
             logger.error(f"IP Query Error: {e}")
             await safe_reply(u, "❌ 查询出错")
 
-    # --- 🔥 USDT 查询 (TronScan 对齐版) ---
+    # USDT 查询
     @log_interaction
     async def query_usdt(u, c):
         if not u.message.text: return
         try:
             address = u.message.text.strip().replace("查", "").strip()
         except: return
-        
         if not address.startswith("T") or len(address) != 34:
              return await safe_reply(u, "⚠️ 地址格式不对，请输入正确的 TRC20 地址。")
-
         await safe_reply(u, f"🔗 正在查询链上数据: {address} ...")
-
         try:
-            # 读取 API Key
             api_key = os.getenv("TRONSCAN_API_KEY", "")
-            headers = {
-                "User-Agent": "Mozilla/5.0",
-                "TRON-PRO-API-KEY": api_key 
-            }
-            
-            # 1. 查余额
+            headers = { "User-Agent": "Mozilla/5.0", "TRON-PRO-API-KEY": api_key }
             balance_url = f"https://apilist.tronscanapi.com/api/account/tokens?address={address}&start=0&limit=20&hidden=0&show=0&sortType=0"
-            
-            # 2. 查转账 (只查 USDT 合约)
             usdt_contract = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
             transfer_url = f"https://apilist.tronscanapi.com/api/token_trc20/transfers?limit=10&start=0&sort=-timestamp&count=true&relatedAddress={address}&contract_address={usdt_contract}"
             
@@ -540,56 +520,39 @@ def setup_calculator_bot(app_instance: Application) -> None:
                 GLOBAL_HTTP_CLIENT.get(balance_url, headers=headers),
                 GLOBAL_HTTP_CLIENT.get(transfer_url, headers=headers)
             )
-
             if resp_bal.status_code != 200:
                 return await safe_reply(u, f"❌ 查询被拦截 (HTTP {resp_bal.status_code})。")
 
             bal_data = resp_bal.json()
             trans_data = resp_trans.json()
-            
-            # --- 处理余额 ---
             usdt_balance = 0.0
             for t in bal_data.get('data', []):
                 if t.get('tokenId') == usdt_contract or t.get('tokenAbbr') == 'USDT':
-                    # 强制 6 位精度
                     raw_balance = float(t.get('balance', 0))
                     usdt_balance = raw_balance / 1000000
                     break
-            
             balance_str = "{:,.2f}".format(usdt_balance)
-
-            # --- 处理转账记录 ---
             transfers = trans_data.get('token_transfers', [])
             trans_lines = []
-            
             if not transfers:
                 trans_lines.append("暂无近 10 笔 USDT 记录")
             else:
                 for tx in transfers:
-                    if tx.get('contract_address') != usdt_contract:
-                        continue
-
+                    if tx.get('contract_address') != usdt_contract: continue
                     is_in = tx.get('to_address') == address
                     arrow = "🟢收" if is_in else "🔴转"
-                    
                     amt = float(tx.get('quant', 0)) / 1000000
                     amt_str = "{:,.2f}".format(amt)
-                    
                     ts = int(tx.get('block_ts', 0)) / 1000
                     dt_object = datetime.fromtimestamp(ts, timezone(timedelta(hours=8)))
                     time_str = dt_object.strftime('%m-%d %H:%M')
-                    
                     other = tx.get('from_address') if is_in else tx.get('to_address')
                     other_short = f"{other[:4]}...{other[-4:]}"
-                    
                     status_icon = "" if tx.get('confirmed') else "⏳"
-                    
                     trans_lines.append(f"{arrow} {amt_str} | {other_short} | {time_str} {status_icon}")
-
-            # 只取前 5 条
+            
             final_list = trans_lines[:6]
             trans_text = "\n".join(final_list)
-
             msg = (
                 f"💰 <b>钱包查询结果</b>\n"
                 f"地址: <code>{address}</code>\n"
@@ -599,7 +562,6 @@ def setup_calculator_bot(app_instance: Application) -> None:
                 f"🔗 <a href=\"https://tronscan.org/#/address/{address}/transfers\">点击查看 TronScan 完整明细</a>"
             )
             await safe_reply(u, msg, parse_mode='HTML')
-
         except Exception as e:
             logger.error(f"USDT Query Error: {e}")
             await safe_reply(u, f"❌ 查询失败: {e}")
@@ -637,13 +599,10 @@ def setup_calculator_bot(app_instance: Application) -> None:
     app_instance.add_handler(MessageHandler(filters.Regex(IPO_COMMAND_PATTERN), get_ipo_info))
     app_instance.add_handler(MessageHandler(filters.Regex(DIGEST_COMMAND_PATTERN), get_daily_digest))
 
-    # --- 🔥 计算器升级：支持回复连续计算 + 兼容 / 开头 ---
     @log_interaction
     async def calc(u,c):
         text = u.message.text
         if not text: return
-        
-        # 1. 尝试 "引用回复" 连续计算
         if u.message.reply_to_message and u.message.reply_to_message.text:
             prev_msg = u.message.reply_to_message.text
             match = re.search(r'🔢\s*([0-9\.]+)', prev_msg.replace(',', ''))
@@ -655,8 +614,6 @@ def setup_calculator_bot(app_instance: Application) -> None:
                     if res is not None:
                         await safe_reply(u, f"🔢 {res}")
                         return
-
-        # 2. 普通计算 (不再拦截 / 开头)
         res = do_calc(text)
         if res is not None: 
             await safe_reply(u, f"🔢 {res}")
@@ -696,7 +653,6 @@ async def startup_event():
         v = os.getenv(f"IMAGE_{i}_URL", "").strip()
         if k and v: 
             for key in k.split(','): GLOBAL_IMAGE_MAP[key.strip()] = v
-            
         k = os.getenv(f"VIDEO_{i}_KEYS", "").strip()
         v = os.getenv(f"VIDEO_{i}_URL", "").strip()
         if k and v: 
@@ -710,14 +666,10 @@ async def startup_event():
     # --- 工兵 (1-10) ---
     for i in range(1, 11):
         raw_token = os.getenv(f"BOT_TOKEN_{i}")
-        
         if raw_token:
             token = raw_token.strip() 
-            if len(token) < 10:
-                continue
-                
-            if token in active_tokens:
-                continue
+            if len(token) < 10: continue
+            if token in active_tokens: continue
             
             try:
                 bot = Application.builder().token(token).build()
@@ -725,17 +677,36 @@ async def startup_event():
                 bot.bot_data["bot_index"] = i
                 await bot.initialize()
                 setup_worker_bot(bot, i) 
-                
                 path = f"bot{i}_webhook"
                 BOT_APPLICATIONS[path] = bot
-                
                 if url := os.getenv(f"BOT_{i}_API_URL", "").strip(): BOT_API_URLS[path] = url
                 if url := os.getenv(f"BOT_{i}_APK_URL", "").strip(): BOT_APK_URLS[path] = url
                 if al := os.getenv(f"BOT_{i}_ALLOWED_CHAT_IDS", "").strip(): 
                     BOT_ALLOWED_CHATS[path] = [c.strip() for c in al.split(',')]
                 
+                # 🔥🔥🔥🔥 【重点修复】恢复了工兵Bot的定时任务逻辑 🔥🔥🔥🔥
+                # 读取环境变量：CHAT_ID, MESSAGE, TIMES_UTC (例如: 08:00,12:00)
+                schedule_chat_id = os.getenv(f"BOT_{i}_SCHEDULE_CHAT_ID")
+                schedule_msg = os.getenv(f"BOT_{i}_SCHEDULE_MESSAGE")
+                schedule_times = os.getenv(f"BOT_{i}_SCHEDULE_TIMES_UTC")
+
+                if schedule_chat_id and schedule_msg and schedule_times:
+                    # 解析时间 (支持多个时间点，逗号分隔)
+                    for t_str in schedule_times.split(','):
+                        try:
+                            # 格式必须是 HH:MM
+                            h, m = map(int, t_str.strip().split(':'))
+                            bot.job_queue.run_daily(
+                                send_scheduled_worker_message,
+                                time=time(hour=h, minute=m), # 这里是 UTC 时间
+                                data={'chat_id': schedule_chat_id, 'text': schedule_msg},
+                                name=f"bot_{i}_schedule_{h}_{m}"
+                            )
+                            logger.info(f"⏰ 工兵 #{i} 定时任务已添加: UTC {h}:{m} 发送消息")
+                        except ValueError:
+                            logger.error(f"❌ 工兵 #{i} 时间格式错误: {t_str} (应为 HH:MM)")
+
                 await bot.start()
-                
                 try:
                     await bot.updater.start_polling(drop_pending_updates=True)
                     logger.info(f"✅ Worker {i} Started Polling")
@@ -743,17 +714,14 @@ async def startup_event():
                     logger.warning(f"🛡️ 触发盾牌: Worker {i} 遇到 Conflict (正常)，等待旧实例退出...")
                 except Exception as e:
                     logger.error(f"❌ Worker {i} Polling Error: {e}")
-
                 active_tokens.add(token)
             except Exception as e:
                 logger.error(f"❌ Worker {i} 启动失败: {e}")
 
-    # --- 计算器 ---
+    # --- 计算器 (带定时任务) ---
     raw_calc_token = os.getenv("CALC_BOT_TOKEN")
-    
     if raw_calc_token:
         calc_token = raw_calc_token.strip()
-        
         if calc_token in active_tokens:
              logger.warning("⚠️ 跳过计算器 Bot: Token 已经被工兵 Bot 使用了！")
         else:
@@ -763,6 +731,12 @@ async def startup_event():
                 setup_calculator_bot(c_bot)
                 await c_bot.start()
                 
+                # 计算器的定时日报 (如果有配置)
+                target_chat_id = os.getenv("CALC_CHAT_ID")
+                if target_chat_id:
+                    c_bot.job_queue.run_daily(auto_send_digest, time=time(hour=0, minute=0), data={'chat_id': target_chat_id})
+                    logger.info(f"⏰ 计算器日报定时任务已启动: 每天 UTC 00:00 发送到 {target_chat_id}")
+
                 try:
                     await c_bot.updater.start_polling(drop_pending_updates=True)
                     logger.info(f"✅ Calc Bot Started Polling")
@@ -782,19 +756,14 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown():
     logger.info("Starting graceful shutdown...")
-
     for b in BOT_APPLICATIONS.values():
         try:
-            if b.updater and b.updater.running:
-                await b.updater.stop()
-            if b.running:
-                await b.stop()
+            if b.updater and b.updater.running: await b.updater.stop()
+            if b.running: await b.stop()
             await b.shutdown()
         except Exception as e:
             logger.error(f"Error shutting down bot: {e}")
-
     if GLOBAL_HTTP_CLIENT: await GLOBAL_HTTP_CLIENT.aclose()
     if BROWSER_INSTANCE: await BROWSER_INSTANCE.close()
     if PLAYWRIGHT_INSTANCE: await PLAYWRIGHT_INSTANCE.stop()
-    
     logger.info("Shutdown complete.")
