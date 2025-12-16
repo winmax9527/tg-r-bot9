@@ -68,6 +68,8 @@ ANDROID_TAB_LIMIT_PATTERN = r"^(安卓窗口上限|窗口上限|标签上限)$"
 IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
 IPO_COMMAND_PATTERN = r"^(新股|新股申购|新股上市|近期新股|申购|上市)$"
 DIGEST_COMMAND_PATTERN = r"^(日报|简报|新闻|每日简报|科技新闻)$"
+# 🔥 新增：下载方式指引
+DOWNLOAD_HELP_PATTERN = r"^(下载方式|下载说明)$"
 
 # 🔥【智能IP正则】兼容 IPv4 和 IPv6
 IP_QUERY_PATTERN = r"^(?:(?:查|IP定位)\s*[0-9a-fA-F:.]+|(?:\d{1,3}\.){3}\d{1,3}|(?:[0-9a-fA-F]{0,4}:){2,}[0-9a-fA-F:.]*)$"
@@ -399,6 +401,21 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
 
     app_instance.add_handler(CommandHandler("start", start))
     
+    # --- 🔥 新增：下载方式说明 ---
+    t_download_help = (
+        "🤖 <b>获取 APP 最新下载链接方式</b>\n\n"
+        "📱 <b>通用链接 (苹果/安卓)</b>\n"
+        "✅ 含落地引导页，发送下方任一词：\n"
+        "🔴链接  🔴苹果链接  🔴安卓链接\n"
+        "〰️〰️〰️〰️〰️〰️〰️〰️\n"
+        "📦 <b>安卓专用 (安装包直连)</b>\n"
+        "❌ 无落地页，发送下方任一词：\n"
+        "🔴提包  🔴安卓专用\n\n"
+        "💡 <i>说明：每个链接都是临时的；每次都重新获取，有效时间为半小时左右！</i>"
+    )
+    # 注册“下载方式”指令
+    app_instance.add_handler(MessageHandler(filters.Regex(DOWNLOAD_HELP_PATTERN), lambda u,c: send_static_reply(u,c,t_download_help)))
+
     # IP 查询
     @log_interaction
     async def query_ip(u, c):
@@ -673,13 +690,8 @@ async def startup_event():
                     bot.bot_data["api_url"] = url
                 if apk := os.getenv(f"BOT_{i}_APK_URL", "").strip():
                     bot.bot_data["apk_url"] = apk
-                if al := os.getenv(f"BOT_{i}_ALLOWED_CHAT_IDS", "").strip():
+                if al := os.getenv(f"BOT_{i}_ALLOWED_CHAT_IDS", "").strip(): 
                     bot.bot_data["allowed_chats"] = [c.strip() for c in al.split(',')]
-
-                await bot.initialize()
-                setup_worker_bot(bot, i) 
-                path = f"bot{i}_webhook"
-                BOT_APPLICATIONS[path] = bot
                 
                 # 恢复定时任务逻辑
                 schedule_chat_id = os.getenv(f"BOT_{i}_SCHEDULE_CHAT_ID")
