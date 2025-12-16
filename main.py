@@ -38,15 +38,14 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 # 2. 全局变量
 # ==============================================================================
 BOT_APPLICATIONS: Dict[str, Application] = {}
-BOT_API_URLS: Dict[str, str] = {}
-BOT_APK_URLS: Dict[str, str] = {}
-BOT_SCHEDULES: Dict[str, Dict[str, Any]] = {}
+# 下面这几个字典仅做辅助，核心逻辑已改为 bot_data 存储
+BOT_APK_URLS: Dict[str, str] = {} 
 BOT_ALLOWED_CHATS: Dict[str, List[str]] = {}
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
 GLOBAL_HTTP_CLIENT: httpx.AsyncClient | None = None
 
-# ⚠️ 注意：如果Render内存溢出(OOM)，请将此处改为 Semaphore(2)
+# ⚠️ 并发锁：防止内存溢出
 BROWSER_LOCK = asyncio.Semaphore(3)
 
 # RSS 源
@@ -70,7 +69,7 @@ IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
 IPO_COMMAND_PATTERN = r"^(新股|新股申购|新股上市|近期新股|申购|上市)$"
 DIGEST_COMMAND_PATTERN = r"^(日报|简报|新闻|每日简报|科技新闻)$"
 
-# 🔥【智能IP正则】
+# 🔥【智能IP正则】兼容 IPv4 和 IPv6
 IP_QUERY_PATTERN = r"^(?:(?:查|IP定位)\s*[0-9a-fA-F:.]+|(?:\d{1,3}\.){3}\d{1,3}|(?:[0-9a-fA-F]{0,4}:){2,}[0-9a-fA-F:.]*)$"
 
 GLOBAL_IMAGE_MAP: Dict[str, str] = {}
@@ -83,17 +82,15 @@ GLOBAL_VIDEO_PATTERN: str = ""
 # ==============================================================================
 
 def is_chat_allowed(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
-    current_app = context.application
-    allowed_list: List[str] = []
-    for path, app_instance in BOT_APPLICATIONS.items():
-        if app_instance is current_app:
-            allowed_list = BOT_ALLOWED_CHATS.get(path, [])
-            break
+    # 优先从 bot_data 获取白名单，如果没有则放行
+    allowed_list = context.bot_data.get("allowed_chats", [])
     if not allowed_list: return True
+    
     chat_id_str = str(chat_id)
     possible_ids = {chat_id_str}
     if chat_id_str.startswith("-100"): possible_ids.add(f"-{chat_id_str[4:]}")
     elif chat_id_str.startswith("-"): possible_ids.add(f"-100{chat_id_str[1:]}")
+    
     for cid in possible_ids:
         if cid in allowed_list: return True
     return False
@@ -172,12 +169,9 @@ def modify_url_subdomain(url_str: str, new_sub: str) -> str:
 async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
 
-    current_app = context.application
-    api_url = None
-    for path, app_instance in BOT_APPLICATIONS.items():
-        if app_instance is current_app:
-            api_url = BOT_API_URLS.get(path)
-            break
+    # 🔥🔥🔥 修复核心：直接从 bot_data 获取 API URL，不再查全局字典 🔥🔥🔥
+    api_url = context.bot_data.get("api_url")
+    
     if not api_url:
         await safe_reply(update, "❌ 配置错误：未找到 API。")
         return
@@ -234,12 +228,10 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 @log_interaction
 async def get_android_specific_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
-    current_app = context.application
-    apk_template = None
-    for path, app_instance in BOT_APPLICATIONS.items():
-        if app_instance is current_app:
-            apk_template = BOT_APK_URLS.get(path)
-            break
+    
+    # 🔥🔥🔥 修复核心：直接从 bot_data 获取 APK URL 🔥🔥🔥
+    apk_template = context.bot_data.get("apk_url")
+    
     if not apk_template: return
     try:
         random_sub = generate_android_specific_subdomain()
@@ -341,7 +333,7 @@ async def get_ipo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             if page: await page.close()
 
-# 🔥 核心：生成日报内容的函数 (抽离出来，供手动和定时调用)
+# 🔥 核心：生成日报内容的函数
 async def generate_digest_content() -> str:
     entries = []
     try:
@@ -375,9 +367,8 @@ async def auto_send_digest(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"❌ 定时发送失败: {e}")
 
-# 🔥🔥 【工兵Bot】定时发送回调 (恢复的逻辑) 🔥🔥
+# 🔥🔥 【工兵Bot】定时发送回调 (已恢复) 🔥🔥
 async def send_scheduled_worker_message(context: ContextTypes.DEFAULT_TYPE):
-    # data 里面存了 {'chat_id': xxx, 'text': xxx}
     job_data = context.job.data
     if not job_data: return
     try:
@@ -675,50 +666,53 @@ async def startup_event():
                 bot = Application.builder().token(token).build()
                 bot.bot_data["fastapi_app"] = app
                 bot.bot_data["bot_index"] = i
+                
+                # 🔥🔥🔥🔥 修复核心：直接读取环境变量并存入 bot_data (解决 "配置错误") 🔥🔥🔥🔥
+                # 这样 handler 直接取 bot_data['api_url']，绝对不会找不到
+                if url := os.getenv(f"BOT_{i}_API_URL", "").strip():
+                    bot.bot_data["api_url"] = url
+                if apk := os.getenv(f"BOT_{i}_APK_URL", "").strip():
+                    bot.bot_data["apk_url"] = apk
+                if al := os.getenv(f"BOT_{i}_ALLOWED_CHAT_IDS", "").strip():
+                    bot.bot_data["allowed_chats"] = [c.strip() for c in al.split(',')]
+
                 await bot.initialize()
                 setup_worker_bot(bot, i) 
                 path = f"bot{i}_webhook"
                 BOT_APPLICATIONS[path] = bot
-                if url := os.getenv(f"BOT_{i}_API_URL", "").strip(): BOT_API_URLS[path] = url
-                if url := os.getenv(f"BOT_{i}_APK_URL", "").strip(): BOT_APK_URLS[path] = url
-                if al := os.getenv(f"BOT_{i}_ALLOWED_CHAT_IDS", "").strip(): 
-                    BOT_ALLOWED_CHATS[path] = [c.strip() for c in al.split(',')]
                 
-                # 🔥🔥🔥🔥 【重点修复】恢复了工兵Bot的定时任务逻辑 🔥🔥🔥🔥
-                # 读取环境变量：CHAT_ID, MESSAGE, TIMES_UTC (例如: 08:00,12:00)
+                # 恢复定时任务逻辑
                 schedule_chat_id = os.getenv(f"BOT_{i}_SCHEDULE_CHAT_ID")
                 schedule_msg = os.getenv(f"BOT_{i}_SCHEDULE_MESSAGE")
                 schedule_times = os.getenv(f"BOT_{i}_SCHEDULE_TIMES_UTC")
 
                 if schedule_chat_id and schedule_msg and schedule_times:
-                    # 解析时间 (支持多个时间点，逗号分隔)
                     for t_str in schedule_times.split(','):
                         try:
-                            # 格式必须是 HH:MM
                             h, m = map(int, t_str.strip().split(':'))
                             bot.job_queue.run_daily(
                                 send_scheduled_worker_message,
-                                time=time(hour=h, minute=m), # 这里是 UTC 时间
+                                time=time(hour=h, minute=m),
                                 data={'chat_id': schedule_chat_id, 'text': schedule_msg},
                                 name=f"bot_{i}_schedule_{h}_{m}"
                             )
-                            logger.info(f"⏰ 工兵 #{i} 定时任务已添加: UTC {h}:{m} 发送消息")
+                            logger.info(f"⏰ 工兵 #{i} 定时任务已添加: UTC {h}:{m}")
                         except ValueError:
-                            logger.error(f"❌ 工兵 #{i} 时间格式错误: {t_str} (应为 HH:MM)")
+                            logger.error(f"❌ 工兵 #{i} 时间格式错误: {t_str}")
 
                 await bot.start()
                 try:
                     await bot.updater.start_polling(drop_pending_updates=True)
                     logger.info(f"✅ Worker {i} Started Polling")
                 except Conflict:
-                    logger.warning(f"🛡️ 触发盾牌: Worker {i} 遇到 Conflict (正常)，等待旧实例退出...")
+                    logger.warning(f"🛡️ 触发盾牌: Worker {i} 遇到 Conflict...")
                 except Exception as e:
                     logger.error(f"❌ Worker {i} Polling Error: {e}")
                 active_tokens.add(token)
             except Exception as e:
                 logger.error(f"❌ Worker {i} 启动失败: {e}")
 
-    # --- 计算器 (带定时任务) ---
+    # --- 计算器 ---
     raw_calc_token = os.getenv("CALC_BOT_TOKEN")
     if raw_calc_token:
         calc_token = raw_calc_token.strip()
@@ -731,17 +725,16 @@ async def startup_event():
                 setup_calculator_bot(c_bot)
                 await c_bot.start()
                 
-                # 计算器的定时日报 (如果有配置)
                 target_chat_id = os.getenv("CALC_CHAT_ID")
                 if target_chat_id:
                     c_bot.job_queue.run_daily(auto_send_digest, time=time(hour=0, minute=0), data={'chat_id': target_chat_id})
-                    logger.info(f"⏰ 计算器日报定时任务已启动: 每天 UTC 00:00 发送到 {target_chat_id}")
+                    logger.info(f"⏰ 计算器日报定时任务已启动: {target_chat_id}")
 
                 try:
                     await c_bot.updater.start_polling(drop_pending_updates=True)
                     logger.info(f"✅ Calc Bot Started Polling")
                 except Conflict:
-                    logger.warning(f"🛡️ 触发盾牌: Calc Bot 遇到 Conflict (正常)，等待旧实例退出...")
+                    logger.warning(f"🛡️ 触发盾牌: Calc Bot 遇到 Conflict...")
                 except Exception as e:
                     logger.error(f"❌ Calc Bot Polling Error: {e}")
 
