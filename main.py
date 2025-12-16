@@ -38,7 +38,6 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 # 2. 全局变量
 # ==============================================================================
 BOT_APPLICATIONS: Dict[str, Application] = {}
-# 下面这几个字典仅做辅助，核心逻辑已改为 bot_data 存储
 BOT_APK_URLS: Dict[str, str] = {} 
 BOT_ALLOWED_CHATS: Dict[str, List[str]] = {}
 PLAYWRIGHT_INSTANCE: Playwright | None = None
@@ -477,11 +476,13 @@ def setup_calculator_bot(app_instance: Application) -> None:
     
     app_instance.add_handler(CommandHandler("start", start))
     
+    # --- 🔥 IP 查询 (支持 IPv4 和 IPv6) ---
     @log_interaction
     async def query_ip(u, c):
         if not u.message.text: return
         text = u.message.text.strip()
         target_ip = re.sub(r"^(查|IP定位)\s*", "", text).strip()
+        
         await safe_reply(u, f"🔍 正在查询 IP: {target_ip} ...")
         try:
             url = f"http://ipwho.is/{target_ip}?lang=zh-CN"
@@ -507,20 +508,31 @@ def setup_calculator_bot(app_instance: Application) -> None:
             logger.error(f"IP Query Error: {e}")
             await safe_reply(u, "❌ 查询出错")
 
-    # USDT 查询
+    # --- 🔥 USDT 查询 ---
     @log_interaction
     async def query_usdt(u, c):
         if not u.message.text: return
         try:
             address = u.message.text.strip().replace("查", "").strip()
         except: return
+        
         if not address.startswith("T") or len(address) != 34:
              return await safe_reply(u, "⚠️ 地址格式不对，请输入正确的 TRC20 地址。")
+
         await safe_reply(u, f"🔗 正在查询链上数据: {address} ...")
+
         try:
+            # 读取 API Key
             api_key = os.getenv("TRONSCAN_API_KEY", "")
-            headers = { "User-Agent": "Mozilla/5.0", "TRON-PRO-API-KEY": api_key }
+            headers = {
+                "User-Agent": "Mozilla/5.0",
+                "TRON-PRO-API-KEY": api_key 
+            }
+            
+            # 1. 查余额
             balance_url = f"https://apilist.tronscanapi.com/api/account/tokens?address={address}&start=0&limit=20&hidden=0&show=0&sortType=0"
+            
+            # 2. 查转账 (只查 USDT 合约)
             usdt_contract = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
             transfer_url = f"https://apilist.tronscanapi.com/api/token_trc20/transfers?limit=10&start=0&sort=-timestamp&count=true&relatedAddress={address}&contract_address={usdt_contract}"
             
@@ -528,39 +540,58 @@ def setup_calculator_bot(app_instance: Application) -> None:
                 GLOBAL_HTTP_CLIENT.get(balance_url, headers=headers),
                 GLOBAL_HTTP_CLIENT.get(transfer_url, headers=headers)
             )
+
             if resp_bal.status_code != 200:
                 return await safe_reply(u, f"❌ 查询被拦截 (HTTP {resp_bal.status_code})。")
 
             bal_data = resp_bal.json()
             trans_data = resp_trans.json()
+            
+            # --- 处理余额 ---
             usdt_balance = 0.0
             for t in bal_data.get('data', []):
                 if t.get('tokenId') == usdt_contract or t.get('tokenAbbr') == 'USDT':
+                    # 强制 6 位精度
                     raw_balance = float(t.get('balance', 0))
                     usdt_balance = raw_balance / 1000000
                     break
+            
             balance_str = "{:,.2f}".format(usdt_balance)
+
+            # --- 处理转账记录 ---
             transfers = trans_data.get('token_transfers', [])
             trans_lines = []
+            
             if not transfers:
                 trans_lines.append("暂无近 10 笔 USDT 记录")
             else:
                 for tx in transfers:
-                    if tx.get('contract_address') != usdt_contract: continue
+                    # 双重保险：再次确认 USDT
+                    if tx.get('contract_address') != usdt_contract:
+                        continue
+
                     is_in = tx.get('to_address') == address
                     arrow = "🟢收" if is_in else "🔴转"
+                    
                     amt = float(tx.get('quant', 0)) / 1000000
                     amt_str = "{:,.2f}".format(amt)
+                    
+                    # 时间 (转为北京时间 UTC+8)
                     ts = int(tx.get('block_ts', 0)) / 1000
                     dt_object = datetime.fromtimestamp(ts, timezone(timedelta(hours=8)))
                     time_str = dt_object.strftime('%m-%d %H:%M')
+                    
                     other = tx.get('from_address') if is_in else tx.get('to_address')
                     other_short = f"{other[:4]}...{other[-4:]}"
+                    
                     status_icon = "" if tx.get('confirmed') else "⏳"
+                    
                     trans_lines.append(f"{arrow} {amt_str} | {other_short} | {time_str} {status_icon}")
-            
+
+            # 只取前 5 条
             final_list = trans_lines[:6]
             trans_text = "\n".join(final_list)
+
             msg = (
                 f"💰 <b>钱包查询结果</b>\n"
                 f"地址: <code>{address}</code>\n"
@@ -570,6 +601,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
                 f"🔗 <a href=\"https://tronscan.org/#/address/{address}/transfers\">点击查看 TronScan 完整明细</a>"
             )
             await safe_reply(u, msg, parse_mode='HTML')
+
         except Exception as e:
             logger.error(f"USDT Query Error: {e}")
             await safe_reply(u, f"❌ 查询失败: {e}")
@@ -607,10 +639,13 @@ def setup_calculator_bot(app_instance: Application) -> None:
     app_instance.add_handler(MessageHandler(filters.Regex(IPO_COMMAND_PATTERN), get_ipo_info))
     app_instance.add_handler(MessageHandler(filters.Regex(DIGEST_COMMAND_PATTERN), get_daily_digest))
 
+    # --- 🔥 计算器升级：支持回复连续计算 + 兼容 / 开头 ---
     @log_interaction
     async def calc(u,c):
         text = u.message.text
         if not text: return
+        
+        # 1. 尝试 "引用回复" 连续计算
         if u.message.reply_to_message and u.message.reply_to_message.text:
             prev_msg = u.message.reply_to_message.text
             match = re.search(r'🔢\s*([0-9\.]+)', prev_msg.replace(',', ''))
@@ -622,6 +657,8 @@ def setup_calculator_bot(app_instance: Application) -> None:
                     if res is not None:
                         await safe_reply(u, f"🔢 {res}")
                         return
+
+        # 2. 普通计算 (不再拦截 / 开头)
         res = do_calc(text)
         if res is not None: 
             await safe_reply(u, f"🔢 {res}")
@@ -661,6 +698,7 @@ async def startup_event():
         v = os.getenv(f"IMAGE_{i}_URL", "").strip()
         if k and v: 
             for key in k.split(','): GLOBAL_IMAGE_MAP[key.strip()] = v
+            
         k = os.getenv(f"VIDEO_{i}_KEYS", "").strip()
         v = os.getenv(f"VIDEO_{i}_URL", "").strip()
         if k and v: 
@@ -674,10 +712,14 @@ async def startup_event():
     # --- 工兵 (1-10) ---
     for i in range(1, 11):
         raw_token = os.getenv(f"BOT_TOKEN_{i}")
+        
         if raw_token:
             token = raw_token.strip() 
-            if len(token) < 10: continue
-            if token in active_tokens: continue
+            if len(token) < 10:
+                continue
+                
+            if token in active_tokens:
+                continue
             
             try:
                 bot = Application.builder().token(token).build()
@@ -692,6 +734,14 @@ async def startup_event():
                     bot.bot_data["apk_url"] = apk
                 if al := os.getenv(f"BOT_{i}_ALLOWED_CHAT_IDS", "").strip(): 
                     bot.bot_data["allowed_chats"] = [c.strip() for c in al.split(',')]
+                
+                # 🔥🔥🔥【CRITICAL FIX HERE】🔥🔥🔥
+                # Ensure bot is initialized BEFORE adding jobs to the queue
+                await bot.initialize()
+                
+                setup_worker_bot(bot, i) 
+                path = f"bot{i}_webhook"
+                BOT_APPLICATIONS[path] = bot
                 
                 # 恢复定时任务逻辑
                 schedule_chat_id = os.getenv(f"BOT_{i}_SCHEDULE_CHAT_ID")
@@ -717,9 +767,10 @@ async def startup_event():
                     await bot.updater.start_polling(drop_pending_updates=True)
                     logger.info(f"✅ Worker {i} Started Polling")
                 except Conflict:
-                    logger.warning(f"🛡️ 触发盾牌: Worker {i} 遇到 Conflict...")
+                    logger.warning(f"🛡️ 触发盾牌: Worker {i} 遇到 Conflict (正常)，等待旧实例退出...")
                 except Exception as e:
                     logger.error(f"❌ Worker {i} Polling Error: {e}")
+
                 active_tokens.add(token)
             except Exception as e:
                 logger.error(f"❌ Worker {i} 启动失败: {e}")
@@ -746,7 +797,7 @@ async def startup_event():
                     await c_bot.updater.start_polling(drop_pending_updates=True)
                     logger.info(f"✅ Calc Bot Started Polling")
                 except Conflict:
-                    logger.warning(f"🛡️ 触发盾牌: Calc Bot 遇到 Conflict...")
+                    logger.warning(f"🛡️ 触发盾牌: Calc Bot 遇到 Conflict (正常)，等待旧实例退出...")
                 except Exception as e:
                     logger.error(f"❌ Calc Bot Polling Error: {e}")
 
