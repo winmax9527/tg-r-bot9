@@ -369,15 +369,28 @@ async def auto_send_digest(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"❌ 定时发送失败: {e}")
 
-# 🔥🔥 【工兵Bot】定时发送回调 (已恢复) 🔥🔥
+# 🔥🔥 【工兵Bot】定时发送回调 (重点修复：自动替换 br 和降级重试) 🔥🔥
 async def send_scheduled_worker_message(context: ContextTypes.DEFAULT_TYPE):
     job_data = context.job.data
     if not job_data: return
+    
+    raw_text = job_data['text']
+    # 1. 自动清洗 <br> 为换行符
+    clean_text = raw_text.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+    
+    chat_id = job_data['chat_id']
     try:
-        await context.bot.send_message(chat_id=job_data['chat_id'], text=job_data['text'], parse_mode='HTML')
-        logger.info(f"✅ 工兵定时消息已发送到 {job_data['chat_id']}")
-    except Exception as e:
-        logger.error(f"❌ 工兵定时消息发送失败: {e}")
+        # 2. 尝试用 HTML 发送
+        await context.bot.send_message(chat_id=chat_id, text=clean_text, parse_mode='HTML')
+        logger.info(f"✅ 工兵定时消息已发送到 {chat_id}")
+    except BadRequest as e:
+        logger.warning(f"⚠️ HTML 解析失败 ({e})，正在降级为纯文本重试...")
+        try:
+            # 3. 失败则用纯文本发送 (保底)
+            await context.bot.send_message(chat_id=chat_id, text=clean_text)
+            logger.info(f"✅ 工兵定时消息 (纯文本) 已发送到 {chat_id}")
+        except Exception as e2:
+            logger.error(f"❌ 工兵定时消息发送彻底失败: {e2}")
 
 # 纯文本计算核心 (防呆优化版)
 def do_calc(text):
@@ -406,17 +419,17 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
         "🤖 <b>获取 APP 最新下载链接方式</b>\n\n"
         "📱 <b>通用链接 (苹果/安卓)</b>\n"
         "✅ 含落地引导页，发送下方任一词：\n"
-        "🔴链接  🔴苹果链接  🔴安卓链接\n"
+        "🔴<code>链接</code>  🔴<code>苹果链接</code>  🔴<code>安卓链接</code>\n"
         "〰️〰️〰️〰️〰️〰️〰️〰️\n"
         "📦 <b>安卓专用 (安装包直连)</b>\n"
         "❌ 无落地页，发送下方任一词：\n"
-        "🔴提包  🔴安卓专用\n\n"
-        "💡 <i>说明：每个链接都是临时的；每次都重新获取，有效时间为半小时左右！</i>"
+        "🔴<code>提包</code>  🔴<code>安卓专用</code>\n\n"
+        "💡 <i>说明：每次重新获取，有效时间为半小时左右！</i>"
     )
     # 注册“下载方式”指令
     app_instance.add_handler(MessageHandler(filters.Regex(DOWNLOAD_HELP_PATTERN), lambda u,c: send_static_reply(u,c,t_download_help)))
 
-    # 🔥🔥 统一修复：工兵Bot 也使用 ip-api.com 🔥🔥
+    # 🔥 IP 查询 (统一使用 ip-api.com)
     @log_interaction
     async def query_ip(u, c):
         if not u.message.text: return
@@ -491,7 +504,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
     
     app_instance.add_handler(CommandHandler("start", start))
     
-    # --- 🔥🔥 统一修复：计算器Bot 也使用 ip-api.com 🔥🔥 ---
+    # --- 🔥 IP 查询 (统一使用 ip-api.com) ---
     @log_interaction
     async def query_ip(u, c):
         if not u.message.text: return
