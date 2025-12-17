@@ -38,6 +38,7 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 # 2. 全局变量
 # ==============================================================================
 BOT_APPLICATIONS: Dict[str, Application] = {}
+# 下面这几个字典仅做辅助，核心逻辑已改为 bot_data 存储
 BOT_APK_URLS: Dict[str, str] = {} 
 BOT_ALLOWED_CHATS: Dict[str, List[str]] = {}
 PLAYWRIGHT_INSTANCE: Playwright | None = None
@@ -67,7 +68,7 @@ ANDROID_TAB_LIMIT_PATTERN = r"^(安卓窗口上限|窗口上限|标签上限)$"
 IOS_TAB_LIMIT_PATTERN = r"^(苹果窗口上限|苹果标签上限)$"
 IPO_COMMAND_PATTERN = r"^(新股|新股申购|新股上市|近期新股|申购|上市)$"
 DIGEST_COMMAND_PATTERN = r"^(日报|简报|新闻|每日简报|科技新闻)$"
-# 🔥 新增：下载方式指引
+# 下载方式指引
 DOWNLOAD_HELP_PATTERN = r"^(下载方式|下载说明)$"
 
 # 🔥【智能IP正则】兼容 IPv4 和 IPv6
@@ -415,7 +416,7 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
     # 注册“下载方式”指令
     app_instance.add_handler(MessageHandler(filters.Regex(DOWNLOAD_HELP_PATTERN), lambda u,c: send_static_reply(u,c,t_download_help)))
 
-    # IP 查询
+    # 🔥🔥 统一修复：工兵Bot 也使用 ip-api.com 🔥🔥
     @log_interaction
     async def query_ip(u, c):
         if not u.message.text: return
@@ -423,23 +424,37 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
         target_ip = re.sub(r"^(查|IP定位)\s*", "", text).strip()
         await safe_reply(u, f"🔍 正在查询 IP: {target_ip} ...")
         try:
-            url = f"http://ipwho.is/{target_ip}?lang=zh-CN"
+            # 使用 ip-api.com (无月限额)
+            url = f"http://ip-api.com/json/{target_ip}?lang=zh-CN"
             resp = await GLOBAL_HTTP_CLIENT.get(url)
             data = resp.json()
-            if not data.get('success'):
+            
+            if data.get('status') != 'success':
                 return await safe_reply(u, f"❌ 查询失败: {data.get('message', '未知错误')}")
-            flag = data.get('flag', {}).get('emoji', '🌍')
+            
+            # 字段映射
+            ip = data.get('query', target_ip)
+            country = data.get('country', '')
+            region = data.get('regionName', '')
+            city = data.get('city', '')
+            org = data.get('isp', '') 
+            asn = data.get('as', '')
+            tz = data.get('timezone', '')
+            lat = data.get('lat', 0)
+            lon = data.get('lon', 0)
+            flag = '🌍'
+
             msg = (
                 f"{flag} <b>IP定位结果</b>\n"
-                f"IP: <code>{data.get('ip')}</code>\n"
-                f"位置: {data.get('country')} {data.get('region')} {data.get('city')}\n"
-                f"运营商/组织: {data.get('connection', {}).get('org', 'N/A')}\n"
-                f"ASN: {data.get('connection', {}).get('asn', 'N/A')}\n"
-                f"时区: {data.get('timezone', {}).get('id', 'N/A')}\n"
-                f"当地时间: {data.get('timezone', {}).get('current_time', 'N/A')}\n"
-                f"坐标: {data.get('latitude')}, {data.get('longitude')}\n"
-                f"地图: <a href=\"https://www.google.com/maps?q={data.get('latitude')},{data.get('longitude')}\">Google Maps</a>\n"
-                f"来源: ipwho.is"
+                f"IP: <code>{ip}</code>\n"
+                f"位置: {country} {region} {city}\n"
+                f"运营商/组织: {org}\n"
+                f"ASN: {asn}\n"
+                f"时区: {tz}\n"
+                f"当地时间: N/A\n"
+                f"坐标: {lat}, {lon}\n"
+                f"地图: <a href=\"https://www.google.com/maps?q={lat},{lon}\">Google Maps</a>\n"
+                f"来源: ip-api.com"
             )
             await safe_reply(u, msg, parse_mode='HTML')
         except Exception as e:
@@ -476,7 +491,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
     
     app_instance.add_handler(CommandHandler("start", start))
     
-    # --- 🔥 IP 查询 (支持 IPv4 和 IPv6) ---
+    # --- 🔥🔥 统一修复：计算器Bot 也使用 ip-api.com 🔥🔥 ---
     @log_interaction
     async def query_ip(u, c):
         if not u.message.text: return
@@ -485,23 +500,26 @@ def setup_calculator_bot(app_instance: Application) -> None:
         
         await safe_reply(u, f"🔍 正在查询 IP: {target_ip} ...")
         try:
-            url = f"http://ipwho.is/{target_ip}?lang=zh-CN"
+            # 统一使用 ip-api.com
+            url = f"http://ip-api.com/json/{target_ip}?lang=zh-CN"
             resp = await GLOBAL_HTTP_CLIENT.get(url)
             data = resp.json()
-            if not data.get('success'):
+            
+            if data.get('status') != 'success':
                 return await safe_reply(u, f"❌ 查询失败: {data.get('message', '未知错误')}")
+                
             flag = data.get('flag', {}).get('emoji', '🌍')
             msg = (
                 f"{flag} <b>IP定位结果</b>\n"
-                f"IP: <code>{data.get('ip')}</code>\n"
-                f"位置: {data.get('country')} {data.get('region')} {data.get('city')}\n"
-                f"运营商/组织: {data.get('connection', {}).get('org', 'N/A')}\n"
-                f"ASN: {data.get('connection', {}).get('asn', 'N/A')}\n"
-                f"时区: {data.get('timezone', {}).get('id', 'N/A')}\n"
-                f"当地时间: {data.get('timezone', {}).get('current_time', 'N/A')}\n"
-                f"坐标: {data.get('latitude')}, {data.get('longitude')}\n"
-                f"地图: <a href=\"https://www.google.com/maps?q={data.get('latitude')},{data.get('longitude')}\">Google Maps</a>\n"
-                f"来源: ipwho.is"
+                f"IP: <code>{data.get('query')}</code>\n"
+                f"位置: {data.get('country')} {data.get('regionName')} {data.get('city')}\n"
+                f"运营商/组织: {data.get('isp')}\n"
+                f"ASN: {data.get('as')}\n"
+                f"时区: {data.get('timezone')}\n"
+                f"当地时间: N/A\n"
+                f"坐标: {data.get('lat')}, {data.get('lon')}\n"
+                f"地图: <a href=\"https://www.google.com/maps?q={data.get('lat')},{data.get('lon')}\">Google Maps</a>\n"
+                f"来源: ip-api.com"
             )
             await safe_reply(u, msg, parse_mode='HTML')
         except Exception as e:
