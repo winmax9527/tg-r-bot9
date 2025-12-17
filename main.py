@@ -405,12 +405,12 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
         "🤖 <b>获取 APP 最新下载链接方式</b>\n\n"
         "📱 <b>通用链接 (苹果/安卓)</b>\n"
         "✅ 含落地引导页，发送下方任一词：\n"
-        "🔴<code>链接</code>  🔴<code>苹果链接</code>  🔴<code>安卓链接</code>\n"
+        "🔴链接  🔴苹果链接  🔴安卓链接\n"
         "〰️〰️〰️〰️〰️〰️〰️〰️\n"
         "📦 <b>安卓专用 (安装包直连)</b>\n"
         "❌ 无落地页，发送下方任一词：\n"
-        "🔴<code>提包</code>  🔴<code>安卓专用</code>\n\n"
-        "💡 <i>说明：每次都重新获取，有效时间为半小时左右！</i>"
+        "🔴提包  🔴安卓专用\n\n"
+        "💡 <i>说明：每个链接都是临时的；每次都重新获取，有效时间为半小时左右！</i>"
     )
     # 注册“下载方式”指令
     app_instance.add_handler(MessageHandler(filters.Regex(DOWNLOAD_HELP_PATTERN), lambda u,c: send_static_reply(u,c,t_download_help)))
