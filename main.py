@@ -255,30 +255,37 @@ async def send_global_media(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     key = update.message.text
     url = GLOBAL_VIDEO_MAP.get(key) if is_video else GLOBAL_IMAGE_MAP.get(key)
     
-    if url:
-        try:
-            if is_video:
-                # 🚀 针对视频：下载后再发送
-                async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
-                    # 先给用户一个提示，避免下载大文件时没反应
-                    # await update.message.reply_chat_action("upload_video") 
+    if not url: return
+
+    try:
+        # 针对视频，采用“下载 -> 转发”模式
+        if is_video:
+            # 这里的 timeout 设置为 60s，确保 2MB 文件下载无压力
+            async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+                # 告知用户正在处理（可选）
+                # await update.message.reply_chat_action("upload_video")
+                
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    # 将下载的字节流放入内存
+                    video_stream = BytesIO(resp.content)
+                    video_stream.name = "video.mp4"  # 关键：必须指定文件名后缀
                     
-                    resp = await client.get(url)
-                    if resp.status_code == 200:
-                        video_content = BytesIO(resp.content)
-                        video_content.name = "video.mp4" # 必须指定文件名
-                        await update.message.reply_video(
-                            video=video_content,
-                            caption="✅ 视频加载成功"
-                        )
-                    else:
-                        await update.message.reply_text(f"❌ 视频下载失败 (HTTP {resp.status_code})")
-            else:
-                # 图片通常比较小，维持原样或同样采用下载模式
-                await update.message.reply_photo(photo=url)
-        except Exception as e:
-            logger.error(f"媒体发送失败: {e}")
-            await update.message.reply_text("⚠️ 媒体文件处理出错，请检查配置。")
+                    await update.message.reply_video(
+                        video=video_stream,
+                        caption=f"🎬 视频：{key}"
+                    )
+                else:
+                    logger.error(f"视频下载失败: HTTP {resp.status_code}")
+                    await update.message.reply_text("❌ 无法从服务器获取视频，请检查链接权限。")
+        else:
+            # 图片通常较小，如果原方式不行，也可以参考视频改为下载模式
+            await update.message.reply_photo(photo=url)
+            
+    except Exception as e:
+        logger.error(f"媒体发送异常: {e}")
+        # 如果是文件太大或超时，给予反馈
+        await update.message.reply_text("⚠️ 文件处理失败，可能是链接失效或网络波动。")
 
 # ==============================================================================
 # 5. 🔥 计算器/AI 逻辑
