@@ -247,16 +247,38 @@ async def send_static_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     if not update.message or not is_chat_allowed(context, update.message.chat_id): return
     await safe_reply(update, html_msg, parse_mode='HTML')
 
+from io import BytesIO
+
 @log_interaction
 async def send_global_media(update: Update, context: ContextTypes.DEFAULT_TYPE, is_video=False):
     if not update.message: return
     key = update.message.text
     url = GLOBAL_VIDEO_MAP.get(key) if is_video else GLOBAL_IMAGE_MAP.get(key)
+    
     if url:
         try:
-            if is_video: await update.message.reply_video(video=url)
-            else: await update.message.reply_photo(photo=url)
-        except: pass
+            if is_video:
+                # 🚀 针对视频：下载后再发送
+                async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+                    # 先给用户一个提示，避免下载大文件时没反应
+                    # await update.message.reply_chat_action("upload_video") 
+                    
+                    resp = await client.get(url)
+                    if resp.status_code == 200:
+                        video_content = BytesIO(resp.content)
+                        video_content.name = "video.mp4" # 必须指定文件名
+                        await update.message.reply_video(
+                            video=video_content,
+                            caption="✅ 视频加载成功"
+                        )
+                    else:
+                        await update.message.reply_text(f"❌ 视频下载失败 (HTTP {resp.status_code})")
+            else:
+                # 图片通常比较小，维持原样或同样采用下载模式
+                await update.message.reply_photo(photo=url)
+        except Exception as e:
+            logger.error(f"媒体发送失败: {e}")
+            await update.message.reply_text("⚠️ 媒体文件处理出错，请检查配置。")
 
 # ==============================================================================
 # 5. 🔥 计算器/AI 逻辑
