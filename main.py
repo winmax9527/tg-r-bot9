@@ -206,10 +206,14 @@ async def startup_event():
         c_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), tg_unified_handler))
         await c_app.initialize(); await c_app.start(); await c_app.updater.start_polling(drop_pending_updates=True)
 
-    # 3. 启动 Potato (设定为工兵)
+# 3. 启动 Potato (设定为工兵)
     potato_token = os.getenv("POTATO_BOT_TOKEN")
     if potato_token:
-        p_bot = PotatoBot(potato_token, os.getenv("BOT_1_API_URL"), os.getenv("BOT_1_APK_URL"))
+        # 优先找 POTATO 专属的链接，找不到就复用 BOT_1 的
+        p_api = os.getenv("POTATO_API_URL") or os.getenv("BOT_1_API_URL")
+        p_apk = os.getenv("POTATO_APK_URL") or os.getenv("BOT_1_APK_URL")
+        
+        p_bot = PotatoBot(potato_token, p_api, p_apk)
         asyncio.create_task(p_bot.start_polling())
 
 @app.get("/")
