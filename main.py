@@ -511,8 +511,16 @@ def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
     app_instance.add_handler(MessageHandler(filters.Regex(ANDROID_TAB_LIMIT_PATTERN), lambda u,c: send_static_reply(u,c,t_and_tab)))
     app_instance.add_handler(MessageHandler(filters.Regex(IOS_TAB_LIMIT_PATTERN), lambda u,c: send_static_reply(u,c,t_ios_tab)))
 
-    if GLOBAL_IMAGE_PATTERN: app_instance.add_handler(MessageHandler(filters.Regex(GLOBAL_IMAGE_PATTERN), lambda u,c: send_global_media(u,c,False)))
-    if GLOBAL_VIDEO_PATTERN: app_instance.add_handler(MessageHandler(filters.Regex(GLOBAL_VIDEO_PATTERN), lambda u,c: send_global_media(u,c,True)))
+    # 采用标准的异步函数包装，防止任务被框架吞掉
+    async def trigger_image(u, c): 
+        await send_global_media(u, c, False)
+    async def trigger_video(u, c): 
+        await send_global_media(u, c, True)
+
+    if GLOBAL_IMAGE_PATTERN: 
+        app_instance.add_handler(MessageHandler(filters.Regex(GLOBAL_IMAGE_PATTERN), trigger_image))
+    if GLOBAL_VIDEO_PATTERN: 
+        app_instance.add_handler(MessageHandler(filters.Regex(GLOBAL_VIDEO_PATTERN), trigger_video))
 
 def setup_calculator_bot(app_instance: Application) -> None:
     @log_interaction
