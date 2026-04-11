@@ -632,19 +632,28 @@ def setup_calculator_bot(app_instance: Application) -> None:
 app = FastAPI()
 
 from fastapi.responses import HTMLResponse
+from fastapi import Query
 
 # ==============================================================================
-# 🔥 新增：纯网页版获取链接 (无须 Telegram/Potato)
+# 🔥 网页版获取链接 (带暗号防御 + 自动复制)
 # ==============================================================================
 
 @app.get("/web/{bot_index}", response_class=HTMLResponse)
-async def web_portal(bot_index: int):
+async def web_portal(bot_index: int, key: str = Query(None)):
     """渲染网页前端界面"""
+    
+    # 🛡️ 1. 安全防御：暗号校验
+    # 你可以在 Render 的环境变量里添加一个 WEB_SECRET，比如设置为 "kfc50"
+    # 如果没设置环境变量，默认暗号就是 "666"
+    SECRET_KEY = os.getenv("WEB_SECRET", "666")
+    if key != SECRET_KEY:
+        return HTMLResponse("<h2 style='text-align:center; margin-top:50px; color:#ff3b30;'>⛔️ 访问被拒绝：无效的安全验证码。</h2>")
+
     api_url = os.getenv(f"BOT_{bot_index}_API_URL")
     if not api_url:
         return HTMLResponse("<h1>❌ 找不到该线路配置，请检查 Render 环境变量。</h1>")
 
-    # 这是网页的 HTML+CSS 代码，极其轻量
+    # 网页 HTML+CSS 代码
     html_content = f"""
     <!DOCTYPE html>
     <html lang="zh-CN">
@@ -665,10 +674,11 @@ async def web_portal(bot_index: int):
             .btn:disabled {{ background-color: #ccc !important; cursor: not-allowed; }}
             #result-box {{ margin-top: 25px; padding: 15px; border-radius: 8px; background-color: #f8f9fa; border: 1px solid #e9ecef; display: none; word-break: break-all; text-align: left; }}
             .success-link {{ color: #007aff; font-weight: bold; font-size: 18px; text-decoration: none; display: block; margin: 10px 0; }}
-            .footer-tip {{ margin-top: 20px; font-size: 12px; color: #999; }}
+            .toast {{ position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); color: white; padding: 10px 20px; border-radius: 20px; font-size: 14px; display: none; z-index: 1000; }}
         </style>
     </head>
     <body>
+        <div id="toast" class="toast">✅ 已自动复制到剪贴板</div>
         <div class="container">
             <h2>🚀 专属获取中心 (线路 {bot_index})</h2>
             <p>点击下方按钮，系统将实时为您生成最新地址</p>
@@ -678,16 +688,45 @@ async def web_portal(bot_index: int):
 
             <div id="result-box"></div>
         </div>
-        <div class="footer-tip">请在自带浏览器中打开生成的链接</div>
 
         <script>
+            function showToast(msg) {{
+                const toast = document.getElementById('toast');
+                toast.innerText = msg;
+                toast.style.display = 'block';
+                setTimeout(() => {{ toast.style.display = 'none'; }}, 2000);
+            }}
+
+            async function copyToClipboard(text) {{
+                try {{
+                    if (navigator.clipboard && window.isSecureContext) {{
+                        await navigator.clipboard.writeText(text);
+                    }} else {{
+                        // 兼容老版本浏览器
+                        let textArea = document.createElement("textarea");
+                        textArea.value = text;
+                        textArea.style.position = "fixed";
+                        textArea.style.left = "-999999px";
+                        textArea.style.top = "-999999px";
+                        document.body.appendChild(textArea);
+                        textArea.focus();
+                        textArea.select();
+                        document.execCommand('copy');
+                        textArea.remove();
+                    }}
+                    showToast("✅ 已自动复制到剪贴板");
+                }} catch (err) {{
+                    console.error('复制失败', err);
+                    showToast("⚠️ 自动复制失败，请长按链接手动复制");
+                }}
+            }}
+
             async function fetchLink(type) {{
                 const btnUni = document.getElementById('btn-uni');
                 const btnApk = document.getElementById('btn-apk');
                 const resultBox = document.getElementById('result-box');
                 const activeBtn = type === 'uni' ? btnUni : btnApk;
                 
-                // 禁用按钮防连点
                 btnUni.disabled = true;
                 btnApk.disabled = true;
                 const originalText = activeBtn.innerText;
@@ -700,7 +739,13 @@ async def web_portal(bot_index: int):
                     
                     resultBox.style.display = "block";
                     if (data.status === "success") {{
-                        resultBox.innerHTML = `✅ <b>生成成功！</b><br><a class="success-link" href="${{data.url}}" target="_blank">${{data.url}}</a><span style="font-size:13px; color:#666;">💡 提示：点击链接可直接打开，或长按复制。</span>`;
+                        // 🔥 更新后的文案
+                        resultBox.innerHTML = `✅ <b>生成成功！</b><br>
+                        <a class="success-link" href="${{data.url}}" target="_blank">${{data.url}}</a>
+                        <span style="font-size:13px; color:#666; display:block; margin-top:8px;">💡 提示：请在手机自带浏览器中打开生成的链接，每次重新获取，有效时间为半小时左右！</span>`;
+                        
+                        // 🔥 调用自动复制
+                        await copyToClipboard(data.url);
                     }} else {{
                         resultBox.innerHTML = `❌ <b>生成失败：</b>${{data.error}}`;
                     }}
@@ -708,7 +753,6 @@ async def web_portal(bot_index: int):
                     resultBox.style.display = "block";
                     resultBox.innerHTML = `❌ <b>网络请求错误，请刷新重试。</b>`;
                 }} finally {{
-                    // 恢复按钮
                     btnUni.disabled = false;
                     btnApk.disabled = false;
                     activeBtn.innerText = originalText;
@@ -719,6 +763,7 @@ async def web_portal(bot_index: int):
     </html>
     """
     return HTMLResponse(content=html_content)
+
 
 
 @app.get("/api/get_link/{bot_index}/{link_type}")
