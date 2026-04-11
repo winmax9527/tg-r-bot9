@@ -631,6 +631,120 @@ def setup_calculator_bot(app_instance: Application) -> None:
 # ==============================================================================
 app = FastAPI()
 
+from fastapi.responses import HTMLResponse
+
+# ==============================================================================
+# 🔥 新增：纯网页版获取链接 (无须 Telegram/Potato)
+# ==============================================================================
+
+@app.get("/web/{bot_index}", response_class=HTMLResponse)
+async def web_portal(bot_index: int):
+    """渲染网页前端界面"""
+    api_url = os.getenv(f"BOT_{bot_index}_API_URL")
+    if not api_url:
+        return HTMLResponse("<h1>❌ 找不到该线路配置，请检查 Render 环境变量。</h1>")
+
+    # 这是网页的 HTML+CSS 代码，极其轻量
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>专属链接获取中心 - 线路 {bot_index}</title>
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f4f7f6; display: flex; flex-direction: column; align-items: center; padding: 40px 20px; margin: 0; }}
+            .container {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); width: 100%; max-width: 400px; text-align: center; }}
+            h2 {{ color: #333; margin-top: 0; }}
+            p {{ color: #666; font-size: 14px; margin-bottom: 25px; }}
+            .btn {{ display: block; width: 100%; padding: 15px; margin: 15px 0; font-size: 16px; font-weight: bold; color: white; border: none; border-radius: 8px; cursor: pointer; transition: background 0.3s; box-sizing: border-box; }}
+            .btn-uni {{ background-color: #007aff; }}
+            .btn-uni:hover {{ background-color: #005bb5; }}
+            .btn-apk {{ background-color: #34c759; }}
+            .btn-apk:hover {{ background-color: #248a3d; }}
+            .btn:disabled {{ background-color: #ccc !important; cursor: not-allowed; }}
+            #result-box {{ margin-top: 25px; padding: 15px; border-radius: 8px; background-color: #f8f9fa; border: 1px solid #e9ecef; display: none; word-break: break-all; text-align: left; }}
+            .success-link {{ color: #007aff; font-weight: bold; font-size: 18px; text-decoration: none; display: block; margin: 10px 0; }}
+            .footer-tip {{ margin-top: 20px; font-size: 12px; color: #999; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h2>🚀 专属获取中心 (线路 {bot_index})</h2>
+            <p>点击下方按钮，系统将实时为您生成最新地址</p>
+            
+            <button class="btn btn-uni" id="btn-uni" onclick="fetchLink('uni')">🍏 🤖 获取通用链接 (带落地页)</button>
+            <button class="btn btn-apk" id="btn-apk" onclick="fetchLink('apk')">📦 获取安卓专用 (提包直连)</button>
+
+            <div id="result-box"></div>
+        </div>
+        <div class="footer-tip">请在自带浏览器中打开生成的链接</div>
+
+        <script>
+            async function fetchLink(type) {{
+                const btnUni = document.getElementById('btn-uni');
+                const btnApk = document.getElementById('btn-apk');
+                const resultBox = document.getElementById('result-box');
+                const activeBtn = type === 'uni' ? btnUni : btnApk;
+                
+                // 禁用按钮防连点
+                btnUni.disabled = true;
+                btnApk.disabled = true;
+                const originalText = activeBtn.innerText;
+                activeBtn.innerText = "⏳ 正在拉取底层数据，请稍候...";
+                resultBox.style.display = "none";
+
+                try {{
+                    const response = await fetch(`/api/get_link/{bot_index}/` + type);
+                    const data = await response.json();
+                    
+                    resultBox.style.display = "block";
+                    if (data.status === "success") {{
+                        resultBox.innerHTML = `✅ <b>生成成功！</b><br><a class="success-link" href="${{data.url}}" target="_blank">${{data.url}}</a><span style="font-size:13px; color:#666;">💡 提示：点击链接可直接打开，或长按复制。</span>`;
+                    }} else {{
+                        resultBox.innerHTML = `❌ <b>生成失败：</b>${{data.error}}`;
+                    }}
+                }} catch (error) {{
+                    resultBox.style.display = "block";
+                    resultBox.innerHTML = `❌ <b>网络请求错误，请刷新重试。</b>`;
+                }} finally {{
+                    // 恢复按钮
+                    btnUni.disabled = false;
+                    btnApk.disabled = false;
+                    activeBtn.innerText = originalText;
+                }}
+            }}
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+
+@app.get("/api/get_link/{bot_index}/{link_type}")
+async def api_generate_link(bot_index: int, link_type: str):
+    """处理网页端的获取请求"""
+    api_url = os.getenv(f"BOT_{bot_index}_API_URL")
+    apk_url = os.getenv(f"BOT_{bot_index}_APK_URL")
+
+    if link_type == "uni":
+        if not api_url: return {"status": "error", "error": "服务器未配置 API URL"}
+        try:
+            # 完美复用你之前提取出来的核心 Playwright 逻辑！
+            final_url = await fetch_universal_link_core(api_url)
+            return {"status": "success", "url": final_url}
+        except Exception as e:
+            logger.error(f"网页端获取通用链接失败: {e}")
+            return {"status": "error", "error": "抓取超时或失败，请重试"}
+
+    elif link_type == "apk":
+        if not apk_url: return {"status": "error", "error": "服务器未配置 APK URL"}
+        random_sub = generate_android_specific_subdomain()
+        final_url = apk_url.replace("*", random_sub, 1)
+        return {"status": "success", "url": final_url}
+
+    return {"status": "error", "error": "未知的请求类型"}
+    
 @app.get("/")
 async def root(): return {"status": "ok", "msg": "Bot Service is Running (Shield + Potato Ready)"}
 
