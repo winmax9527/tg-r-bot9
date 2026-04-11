@@ -738,15 +738,25 @@ async def web_portal(bot_index: int, key: str = Query(None)):
                     const data = await response.json();
                     
                     resultBox.style.display = "block";
-                    if (data.status === "success") {{
-                        // 🔥 更新后的文案
+                    if (data.status === "success") {
+                        // 🕒 获取当前时间并格式化
+                        const now = new Date();
+                        const timeString = now.getFullYear() + "-" + 
+                                         String(now.getMonth() + 1).padStart(2, '0') + "-" + 
+                                         String(now.getDate()).padStart(2, '0') + " " + 
+                                         String(now.getHours()).padStart(2, '0') + ":" + 
+                                         String(now.getMinutes()).padStart(2, '0') + ":" + 
+                                         String(now.getSeconds()).padStart(2, '0');
+
+                        // 🔥 更新后的文案 (加入了时间显示)
                         resultBox.innerHTML = `✅ <b>生成成功！</b><br>
-                        <a class="success-link" href="${{data.url}}" target="_blank">${{data.url}}</a>
+                        <span style="font-size:12px; color:#999; display:block; margin-top:5px;">生成时间：${timeString}</span>
+                        <a class="success-link" href="${data.url}" target="_blank">${data.url}</a>
                         <span style="font-size:13px; color:#666; display:block; margin-top:8px;">💡 提示：请在手机自带浏览器中打开生成的链接，每次重新获取，有效时间为半小时左右！</span>`;
                         
                         // 🔥 调用自动复制
                         await copyToClipboard(data.url);
-                    }} else {{
+                    } else {{
                         resultBox.innerHTML = `❌ <b>生成失败：</b>${{data.error}}`;
                     }}
                 }} catch (error) {{
