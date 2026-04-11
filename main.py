@@ -633,18 +633,17 @@ app = FastAPI()
 
 from fastapi.responses import HTMLResponse
 from fastapi import Query
+import os
 
 # ==============================================================================
-# 🔥 网页版获取链接 (带暗号防御 + 自动复制)
+# 🔥 网页版获取链接 (带暗号防御 + 自动复制 + 实时生成时间戳)
 # ==============================================================================
 
 @app.get("/web/{bot_index}", response_class=HTMLResponse)
 async def web_portal(bot_index: int, key: str = Query(None)):
     """渲染网页前端界面"""
     
-    # 🛡️ 1. 安全防御：暗号校验
-    # 你可以在 Render 的环境变量里添加一个 WEB_SECRET，比如设置为 "kfc50"
-    # 如果没设置环境变量，默认暗号就是 "666"
+    # 1. 安全防御：暗号校验
     SECRET_KEY = os.getenv("WEB_SECRET", "666")
     if key != SECRET_KEY:
         return HTMLResponse("<h2 style='text-align:center; margin-top:50px; color:#ff3b30;'>⛔️ 访问被拒绝：无效的安全验证码。</h2>")
@@ -738,8 +737,8 @@ async def web_portal(bot_index: int, key: str = Query(None)):
                     const data = await response.json();
                     
                     resultBox.style.display = "block";
-                    if (data.status === "success") {
-                        // 🕒 获取当前时间并格式化
+                    if (data.status === "success") {{
+                        // 获取当前时间并格式化
                         const now = new Date();
                         const timeString = now.getFullYear() + "-" + 
                                          String(now.getMonth() + 1).padStart(2, '0') + "-" + 
@@ -748,15 +747,15 @@ async def web_portal(bot_index: int, key: str = Query(None)):
                                          String(now.getMinutes()).padStart(2, '0') + ":" + 
                                          String(now.getSeconds()).padStart(2, '0');
 
-                        // 🔥 更新后的文案 (加入了时间显示)
+                        // 更新后的文案，加入了时间显示
                         resultBox.innerHTML = `✅ <b>生成成功！</b><br>
-                        <span style="font-size:12px; color:#999; display:block; margin-top:5px;">生成时间：${timeString}</span>
-                        <a class="success-link" href="${data.url}" target="_blank">${data.url}</a>
+                        <span style="font-size:12px; color:#999; display:block; margin-top:5px;">生成时间：${{timeString}}</span>
+                        <a class="success-link" href="${{data.url}}" target="_blank">${{data.url}}</a>
                         <span style="font-size:13px; color:#666; display:block; margin-top:8px;">💡 提示：请在手机自带浏览器中打开生成的链接，每次重新获取，有效时间为半小时左右！</span>`;
                         
-                        // 🔥 调用自动复制
+                        // 调用自动复制
                         await copyToClipboard(data.url);
-                    } else {{
+                    }} else {{
                         resultBox.innerHTML = `❌ <b>生成失败：</b>${{data.error}}`;
                     }}
                 }} catch (error) {{
@@ -773,7 +772,6 @@ async def web_portal(bot_index: int, key: str = Query(None)):
     </html>
     """
     return HTMLResponse(content=html_content)
-
 
 
 @app.get("/api/get_link/{bot_index}/{link_type}")
