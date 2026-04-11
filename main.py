@@ -226,19 +226,13 @@ async def send_global_media(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     try:
         if is_video:
-            async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
-                resp = await client.get(url)
-                if resp.status_code == 200:
-                    video_stream = BytesIO(resp.content)
-                    video_stream.name = "video.mp4"
-                    await update.message.reply_video(video=video_stream, caption=f"🎬 视频：{key}")
-                else:
-                    await update.message.reply_text("❌ 无法从服务器获取视频，请检查链接权限。")
+            # 🔥 核心修复：直接把 URL 传给 Telegram，不经过本地内存下载！
+            await update.message.reply_video(video=url, caption=f"🎬 视频：{key}")
         else:
             await update.message.reply_photo(photo=url)
     except Exception as e:
         logger.error(f"媒体发送异常: {e}")
-        await update.message.reply_text("⚠️ 文件处理失败，可能是链接失效或网络波动。")
+        await update.message.reply_text("⚠️ 文件处理失败，可能是视频太大导致 Telegram 拒绝、链接失效或网络波动。")
 
 # ==============================================================================
 # 6. 新增：Potato 机器人完整逻辑
