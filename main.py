@@ -5,6 +5,7 @@ import re
 import random
 import string
 import datetime
+import gc
 from datetime import date, datetime, timezone, timedelta, time
 from urllib.parse import urlparse
 from typing import List, Dict, Any
@@ -46,6 +47,26 @@ GLOBAL_HTTP_CLIENT: httpx.AsyncClient | None = None
 
 # ⚠️ 并发锁：保命符！强制改为 1，防止双平台同时触发导致 512M 内存溢出
 BROWSER_LOCK = asyncio.Semaphore(1)
+
+# Render/Playwright 保护参数：减少 Chromium 常驻内存，并在卡死/连续失败时自动重启浏览器
+BROWSER_USE_COUNT = 0
+BROWSER_FAILURE_COUNT = 0
+BROWSER_RESTART_EVERY = int(os.getenv("BROWSER_RESTART_EVERY", "30"))
+BROWSER_MAX_FAILURES = int(os.getenv("BROWSER_MAX_FAILURES", "3"))
+PLAYWRIGHT_FETCH_TIMEOUT = float(os.getenv("PLAYWRIGHT_FETCH_TIMEOUT", "35"))
+
+BROWSER_LAUNCH_ARGS = [
+    "--no-sandbox",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-sync",
+    "--disable-default-apps",
+    "--no-first-run",
+    "--mute-audio",
+    "--disable-features=Translate,BackForwardCache",
+]
 
 # RSS 源
 DEFAULT_RSS_FEEDS = [
@@ -141,39 +162,111 @@ def modify_url_subdomain(url_str: str, new_sub: str) -> str:
         return parsed._replace(netloc=new_netloc).geturl()
     except Exception: return url_str
 
+async def launch_browser_instance() -> Browser:
+    """统一启动 Chromium，Render 低内存环境下尽量瘦身。"""
+    if PLAYWRIGHT_INSTANCE is None:
+        raise RuntimeError("Playwright not ready")
+    return await PLAYWRIGHT_INSTANCE.chromium.launch(headless=True, args=BROWSER_LAUNCH_ARGS)
+
+async def restart_browser(reason: str = "manual") -> None:
+    """浏览器卡死或内存膨胀时，只重启 Chromium，不重启整个 Bot 服务。"""
+    global BROWSER_INSTANCE, BROWSER_FAILURE_COUNT, BROWSER_USE_COUNT
+    logger.warning(f"♻️ 正在重启 Playwright 浏览器: {reason}")
+    old_browser = BROWSER_INSTANCE
+    BROWSER_INSTANCE = None
+    try:
+        if old_browser:
+            await old_browser.close()
+    except Exception as e:
+        logger.warning(f"关闭旧浏览器失败，忽略继续重启: {e}")
+    gc.collect()
+    BROWSER_INSTANCE = await launch_browser_instance()
+    BROWSER_FAILURE_COUNT = 0
+    BROWSER_USE_COUNT = 0
+    try:
+        app.state.browser = BROWSER_INSTANCE
+    except Exception:
+        pass
+    logger.info("✅ Playwright 浏览器已重启")
+
+async def ensure_browser_ready() -> None:
+    """懒加载/兜底：浏览器不存在或已断开时自动拉起。"""
+    global BROWSER_INSTANCE
+    if BROWSER_INSTANCE is None or not BROWSER_INSTANCE.is_connected():
+        await restart_browser("browser missing or disconnected")
+
+async def mark_browser_success() -> None:
+    """成功抓取后计数，达到阈值就主动重启，避免 Render 内存慢慢涨。"""
+    global BROWSER_USE_COUNT, BROWSER_FAILURE_COUNT
+    BROWSER_FAILURE_COUNT = 0
+    BROWSER_USE_COUNT += 1
+    if BROWSER_RESTART_EVERY > 0 and BROWSER_USE_COUNT >= BROWSER_RESTART_EVERY:
+        await restart_browser(f"used {BROWSER_USE_COUNT} times")
+
+async def mark_browser_failure(reason: str) -> None:
+    """连续失败保护，防止 Chromium 卡死后一直拖垮服务。"""
+    global BROWSER_FAILURE_COUNT
+    BROWSER_FAILURE_COUNT += 1
+    logger.warning(f"⚠️ Playwright 抓取失败计数: {BROWSER_FAILURE_COUNT}/{BROWSER_MAX_FAILURES}，原因: {reason}")
+    if BROWSER_FAILURE_COUNT >= BROWSER_MAX_FAILURES:
+        await restart_browser(reason)
+
 async def fetch_universal_link_core(api_url: str) -> str:
     """提取出的核心 Playwright 抓取逻辑，供 TG 和 Potato 共用"""
+    return await asyncio.wait_for(_fetch_universal_link_core_inner(api_url), timeout=PLAYWRIGHT_FETCH_TIMEOUT)
+
+async def _fetch_universal_link_core_inner(api_url: str) -> str:
     user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    context_p = None
     page = None
     async with BROWSER_LOCK:
-        if GLOBAL_HTTP_CLIENT is None: raise RuntimeError("HTTP Client error")
-        resp = await GLOBAL_HTTP_CLIENT.get(api_url, headers={'User-Agent': user_agent})
-        api_data = resp.json()
-        domain_a = api_data.get("data", "").strip()
-        if not domain_a.startswith(('http://', 'https://')): domain_a = 'http://' + domain_a
-        
-        if not BROWSER_INSTANCE: raise RuntimeError("Browser not ready")
-        context_p = await BROWSER_INSTANCE.new_context(user_agent=user_agent)
-        page = await context_p.new_page()
-        
-        await page.route("**/*", lambda route: route.abort() 
-            if route.request.resource_type in ["image", "media", "font", "stylesheet"] 
-            else route.continue_())
-        
-        try: await page.goto(domain_a, wait_until="domcontentloaded", timeout=25000)
-        except Exception: pass
+        try:
+            if GLOBAL_HTTP_CLIENT is None: raise RuntimeError("HTTP Client error")
+            await ensure_browser_ready()
 
-        try: await page.wait_for_timeout(3000)
-        except: pass
-        
-        final_url_b = page.url
-        if "chrome-error" in final_url_b: raise Exception("Chrome Error")
+            resp = await GLOBAL_HTTP_CLIENT.get(api_url, headers={'User-Agent': user_agent})
+            api_data = resp.json()
+            domain_a = api_data.get("data", "").strip()
+            if not domain_a.startswith(('http://', 'https://')): domain_a = 'http://' + domain_a
+            
+            if not BROWSER_INSTANCE: raise RuntimeError("Browser not ready")
+            context_p = await BROWSER_INSTANCE.new_context(user_agent=user_agent)
+            page = await context_p.new_page()
+            page.set_default_timeout(12000)
+            page.set_default_navigation_timeout(25000)
+            
+            await page.route("**/*", lambda route: route.abort() 
+                if route.request.resource_type in ["image", "media", "font", "stylesheet"] 
+                else route.continue_())
+            
+            try: await page.goto(domain_a, wait_until="domcontentloaded", timeout=25000)
+            except Exception: pass
 
-        rand_sub = generate_universal_subdomain()
-        final_url = modify_url_subdomain(final_url_b, rand_sub)
-        
-        await context_p.close()
-        return final_url
+            try: await page.wait_for_timeout(3000)
+            except: pass
+            
+            final_url_b = page.url
+            if "chrome-error" in final_url_b: raise Exception("Chrome Error")
+
+            rand_sub = generate_universal_subdomain()
+            final_url = modify_url_subdomain(final_url_b, rand_sub)
+            await mark_browser_success()
+            return final_url
+        except Exception as e:
+            await mark_browser_failure(str(e))
+            raise
+        finally:
+            try:
+                if page:
+                    await page.close()
+            except Exception as e:
+                logger.warning(f"关闭 Playwright 页面失败: {e}")
+            try:
+                if context_p:
+                    await context_p.close()
+            except Exception as e:
+                logger.warning(f"关闭 Playwright 上下文失败: {e}")
+            gc.collect()
 
 # ==============================================================================
 # 5. Telegram 工兵处理函数
@@ -550,6 +643,35 @@ def setup_calculator_bot(app_instance: Application) -> None:
         except Exception: await safe_reply(u, "❌ 查询出错")
 
     @log_interaction
+    async def query_bank_card(u, c):
+        if not u.message.text: return
+        card_no = re.sub(r"^(查|查卡|银行卡|银行卡查询)\s*", "", u.message.text.strip()).replace(" ", "")
+        if not card_no.isdigit() or not (12 <= len(card_no) <= 24):
+            return await safe_reply(u, "⚠️ 银行卡号格式不对，请输入正确的银行卡号。")
+        await safe_reply(u, f"🏦 正在查询银行卡信息: {card_no} ...")
+        try:
+            url = "https://ccdcapi.alipay.com/validateAndCacheCardInfo.json"
+            params = {"_input_charset": "utf-8", "cardNo": card_no, "cardBinCheck": "true"}
+            resp = await GLOBAL_HTTP_CLIENT.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=15.0)
+            data = resp.json()
+            if not data.get("validated"):
+                return await safe_reply(u, "❌ 查询失败：未识别该银行卡号或接口暂不可用。")
+
+            card_type_map = {"DC": "储蓄卡", "CC": "信用卡", "SCC": "准贷记卡", "PC": "预付费卡"}
+            bank = data.get("bank", "未知银行")
+            card_type = card_type_map.get(data.get("cardType"), data.get("cardType", "未知类型"))
+            msg = (
+                f"🏦 <b>银行卡查询结果</b>\n"
+                f"卡号: <code>{card_no}</code>\n"
+                f"银行: <code>{bank}</code>\n"
+                f"类型: <code>{card_type}</code>"
+            )
+            await safe_reply(u, msg, parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"银行卡查询失败: {e}")
+            await safe_reply(u, "❌ 查询失败，请稍后重试。")
+
+    @log_interaction
     async def query_usdt(u, c):
         if not u.message.text: return
         try: address = u.message.text.strip().replace("查", "").strip()
@@ -589,6 +711,7 @@ def setup_calculator_bot(app_instance: Application) -> None:
         except Exception as e: await safe_reply(u, f"❌ 查询失败: {e}")
 
     app_instance.add_handler(MessageHandler(filters.Regex(IP_QUERY_PATTERN), query_ip))
+    app_instance.add_handler(MessageHandler(filters.Regex(r"^(?:查|查卡|银行卡|银行卡查询)\s*\d{12,24}$"), query_bank_card))
     app_instance.add_handler(MessageHandler(filters.Regex(r"^查\s*T[a-zA-Z0-9]{33}$"), query_usdt))
 
     @log_interaction
@@ -814,7 +937,7 @@ async def startup_event():
     try:
         logger.info("🚀 Starting Playwright...")
         PLAYWRIGHT_INSTANCE = await async_playwright().start()
-        BROWSER_INSTANCE = await PLAYWRIGHT_INSTANCE.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"])
+        BROWSER_INSTANCE = await launch_browser_instance()
         app.state.browser = BROWSER_INSTANCE
         logger.info("✅ System Ready: Playwright Started")
     except Exception as e: logger.error(f"❌ System Start Error (Playwright): {e}")
