@@ -220,14 +220,19 @@ from io import BytesIO
 @log_interaction
 async def send_global_media(update: Update, context: ContextTypes.DEFAULT_TYPE, is_video=False):
     if not update.message: return
-    key = update.message.text
+    key = update.message.text.strip()
     url = GLOBAL_VIDEO_MAP.get(key) if is_video else GLOBAL_IMAGE_MAP.get(key)
     if not url: return
 
     try:
         if is_video:
             # 🔥 核心修复：直接把 URL 传给 Telegram，不经过本地内存下载！
-            await update.message.reply_video(video=url, caption=f"🎬 视频：{key}")
+            # 兼容把 mp3 / m4a / wav / ogg 放在 VIDEO_x_URL 里的情况
+            clean_path = urlparse(url).path.lower()
+            if clean_path.endswith((".mp3", ".m4a", ".wav", ".ogg")):
+                await update.message.reply_audio(audio=url, caption=f"🎬 视频：{key}")
+            else:
+                await update.message.reply_video(video=url, caption=f"🎬 视频：{key}")
         else:
             await update.message.reply_photo(photo=url)
     except Exception as e:
@@ -825,7 +830,7 @@ async def startup_event():
         if k and v: 
             for key in k.split(','): GLOBAL_VIDEO_MAP[key.strip()] = v
     if GLOBAL_IMAGE_MAP: GLOBAL_IMAGE_PATTERN = r"^(" + "|".join([re.escape(k) for k in GLOBAL_IMAGE_MAP.keys()]) + r")$"
-    if GLOBAL_VIDEO_PATTERN: GLOBAL_VIDEO_PATTERN = r"^(" + "|".join([re.escape(k) for k in GLOBAL_VIDEO_MAP.keys()]) + r")$"
+    if GLOBAL_VIDEO_MAP: GLOBAL_VIDEO_PATTERN = r"^(" + "|".join([re.escape(k) for k in GLOBAL_VIDEO_MAP.keys()]) + r")$"
 
     active_tokens = set()
 
