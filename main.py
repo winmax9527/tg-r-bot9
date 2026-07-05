@@ -133,14 +133,18 @@ def log_interaction(func):
     
 async def safe_reply(update: Update, text: str, parse_mode=None):
     try:
-        if parse_mode: await update.message.reply_text(text, parse_mode=parse_mode)
-        else: await update.message.reply_text(text)
+        if parse_mode:
+            await update.message.reply_text(text, parse_mode=parse_mode)
+        else:
+            await update.message.reply_text(text)
     except BadRequest as e:
-        logger.warning(f"Reply failed with {parse_mode}: {e} -> ⚠️ 正在降级为纯文本重发...")
-        try: await update.message.reply_text(text)
-        except Exception as e2: logger.error(f"Retry failed: {e2}")
+        logger.error(f"Reply BadRequest: {e}", exc_info=True)
+        try:
+            await update.message.reply_text(text)
+        except Exception as e2:
+            logger.error(f"Retry Reply failed: {e2}", exc_info=True)
     except Exception as e:
-        logger.error(f"General Reply Error: {e}")
+        logger.error(f"General Reply Error: {type(e).__name__}: {e}", exc_info=True)
 
 # ==============================================================================
 # 4. 核心业务逻辑 (TG & Potato 共用)
@@ -227,13 +231,16 @@ async def _fetch_universal_link_core_inner(api_url: str) -> str:
             resp = await GLOBAL_HTTP_CLIENT.get(api_url, headers={'User-Agent': user_agent})
             api_data = resp.json()
 
-            raw_domain = api_data.get("data")
-            if not raw_domain:
-                raise Exception(f"API返回空data: {api_data}")
+resp = await GLOBAL_HTTP_CLIENT.get(api_url, headers={'User-Agent': user_agent})
+api_data = resp.json()
 
-            domain_a = str(raw_domain).strip()
-            if not domain_a.startswith(('http://', 'https://')):
-                domain_a = 'http://' + domain_a
+raw_domain = api_data.get("data")
+if not raw_domain:
+    raise Exception(f"API返回空data: {api_data}")
+
+domain_a = str(raw_domain).strip()
+            
+            if not domain_a.startswith(('http://', 'https://')): domain_a = 'http://' + domain_a
             
             if not BROWSER_INSTANCE: raise RuntimeError("Browser not ready")
             context_p = await BROWSER_INSTANCE.new_context(user_agent=user_agent)
