@@ -230,6 +230,7 @@ async def _fetch_universal_link_core_inner(api_url: str) -> str:
 
             resp = await GLOBAL_HTTP_CLIENT.get(api_url, headers={'User-Agent': user_agent})
             api_data = resp.json()
+            logger.info(f"API DEBUG url={api_url} status={resp.status_code} data={api_data}")
 
             raw_domain = api_data.get("data")
             if not raw_domain:
