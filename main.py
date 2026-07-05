@@ -96,6 +96,10 @@ GLOBAL_IMAGE_PATTERN: str = ""
 GLOBAL_VIDEO_MAP: Dict[str, str] = {}
 GLOBAL_VIDEO_PATTERN: str = ""
 
+# 启动保护：防止 FastAPI startup 在同一进程内重复执行，导致同一 Bot Token 重复 polling
+STARTUP_ALREADY_RAN = False
+STARTUP_RUN_COUNT = 0
+
 # ==============================================================================
 # 3. 辅助函数
 # ==============================================================================
@@ -942,7 +946,15 @@ async def root(): return {"status": "ok", "msg": "Bot Service is Running (Shield
 
 @app.on_event("startup")
 async def startup_event():
-    global GLOBAL_HTTP_CLIENT, PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
+    global GLOBAL_HTTP_CLIENT, PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE, STARTUP_ALREADY_RAN, STARTUP_RUN_COUNT
+    STARTUP_RUN_COUNT += 1
+    logger.info(f"🚦 startup_event 进入次数: {STARTUP_RUN_COUNT}")
+
+    if STARTUP_ALREADY_RAN:
+        logger.warning("⚠️ startup_event 已经执行过，本次跳过，防止重复启动 polling。")
+        return
+
+    STARTUP_ALREADY_RAN = True
     GLOBAL_HTTP_CLIENT = httpx.AsyncClient(timeout=30.0, verify=False)
     
     try:
@@ -972,8 +984,16 @@ async def startup_event():
     for i in range(1, 11):
         # 1. 启动 Telegram
         raw_token = os.getenv(f"BOT_TOKEN_{i}")
-        if raw_token and len(raw_token.strip()) > 10 and raw_token.strip() not in active_tokens:
-            token = raw_token.strip() 
+        if raw_token and len(raw_token.strip()) > 10:
+            token = raw_token.strip()
+            token_tail = token[-6:]
+            if token in active_tokens:
+                logger.warning(f"⚠️ TG Worker {i} Token 重复，已跳过，token尾号={token_tail}")
+                continue
+
+            # 先登记 token，避免同一个启动流程里后续重复 token 再次 start_polling
+            active_tokens.add(token)
+            logger.info(f"🚀 准备启动 TG Worker {i}, token尾号={token_tail}")
             try:
                 bot = Application.builder().token(token).build()
                 bot.bot_data["fastapi_app"] = app
@@ -1002,13 +1022,13 @@ async def startup_event():
 
                 await bot.start()
                 try:
+                    logger.info(f"📡 TG Worker {i} 即将 start_polling, token尾号={token_tail}")
                     await bot.updater.start_polling(drop_pending_updates=True)
-                    logger.info(f"✅ TG Worker {i} Started Polling")
+                    logger.info(f"✅ TG Worker {i} Started Polling, token尾号={token_tail}")
                 except Conflict: logger.warning(f"🛡️ 触发盾牌: Worker {i} Conflict")
                 except Exception as e: logger.error(f"❌ Worker {i} Polling Error: {e}")
 
-                active_tokens.add(token)
-            except Exception as e: logger.error(f"❌ Worker {i} 启动失败: {e}")
+            except Exception as e: logger.error(f"❌ Worker {i} 启动失败: {e}", exc_info=True)
             
         # 2. 🔥 启动 Potato 机器人协程
         potato_token = os.getenv(f"POTATO_TOKEN_{i}")
@@ -1020,8 +1040,15 @@ async def startup_event():
 
     # --- 启动计算器 ---
     raw_calc_token = os.getenv("CALC_BOT_TOKEN")
-    if raw_calc_token and raw_calc_token.strip() not in active_tokens:
+    if raw_calc_token:
         calc_token = raw_calc_token.strip()
+        calc_tail = calc_token[-6:]
+        if calc_token in active_tokens:
+            logger.warning(f"⚠️ Calc Bot Token 与其他 Bot 重复，已跳过，token尾号={calc_tail}")
+            return
+
+        active_tokens.add(calc_token)
+        logger.info(f"🚀 准备启动 Calc Bot, token尾号={calc_tail}")
         try:
             c_bot = Application.builder().token(calc_token).build()
             await c_bot.initialize()
@@ -1031,14 +1058,14 @@ async def startup_event():
                 c_bot.job_queue.run_daily(auto_send_digest, time=time(hour=0, minute=0), data={'chat_id': target_chat_id})
 
             try:
+                logger.info(f"📡 Calc Bot 即将 start_polling, token尾号={calc_tail}")
                 await c_bot.updater.start_polling(drop_pending_updates=True)
-                logger.info(f"✅ Calc Bot Started Polling")
+                logger.info(f"✅ Calc Bot Started Polling, token尾号={calc_tail}")
             except Conflict: pass
             except Exception as e: logger.error(f"❌ Calc Bot Polling Error: {e}")
 
             BOT_APPLICATIONS["calc"] = c_bot
-            active_tokens.add(calc_token)
-        except Exception as e: logger.error(f"❌ Calc Bot 启动失败: {e}")
+        except Exception as e: logger.error(f"❌ Calc Bot 启动失败: {e}", exc_info=True)
 
 @app.on_event("shutdown")
 async def shutdown():
