@@ -226,7 +226,16 @@ async def _fetch_universal_link_core_inner(api_url: str) -> str:
 
             resp = await GLOBAL_HTTP_CLIENT.get(api_url, headers={'User-Agent': user_agent})
             api_data = resp.json()
-            domain_a = api_data.get("data", "").strip()
+
+resp = await GLOBAL_HTTP_CLIENT.get(api_url, headers={'User-Agent': user_agent})
+api_data = resp.json()
+
+raw_domain = api_data.get("data")
+if not raw_domain:
+    raise Exception(f"API返回空data: {api_data}")
+
+domain_a = str(raw_domain).strip()
+            
             if not domain_a.startswith(('http://', 'https://')): domain_a = 'http://' + domain_a
             
             if not BROWSER_INSTANCE: raise RuntimeError("Browser not ready")
