@@ -769,6 +769,16 @@ def setup_calculator_bot(app_instance: Application) -> None:
 
     app_instance.add_handler(MessageHandler(filters.TEXT | filters.COMMAND, calc))
 
+
+def make_polling_error_callback(name: str, token_tail: str):
+    """给 Updater.start_polling 使用：把 Conflict 等轮询错误标出具体是哪个 Bot。"""
+    def _callback(exc: Exception) -> None:
+        logger.error(
+            f"❌ {name} polling 异常，token尾号={token_tail}: {type(exc).__name__}: {exc}",
+            exc_info=(type(exc), exc, exc.__traceback__)
+        )
+    return _callback
+
 # ==============================================================================
 # 9. 启动入口
 # ==============================================================================
@@ -1023,7 +1033,10 @@ async def startup_event():
                 await bot.start()
                 try:
                     logger.info(f"📡 TG Worker {i} 即将 start_polling, token尾号={token_tail}")
-                    await bot.updater.start_polling(drop_pending_updates=True)
+                    await bot.updater.start_polling(
+                        drop_pending_updates=True,
+                        error_callback=make_polling_error_callback(f"TG Worker {i}", token_tail)
+                    )
                     logger.info(f"✅ TG Worker {i} Started Polling, token尾号={token_tail}")
                 except Conflict: logger.warning(f"🛡️ 触发盾牌: Worker {i} Conflict")
                 except Exception as e: logger.error(f"❌ Worker {i} Polling Error: {e}")
@@ -1059,7 +1072,10 @@ async def startup_event():
 
             try:
                 logger.info(f"📡 Calc Bot 即将 start_polling, token尾号={calc_tail}")
-                await c_bot.updater.start_polling(drop_pending_updates=True)
+                await c_bot.updater.start_polling(
+                    drop_pending_updates=True,
+                    error_callback=make_polling_error_callback("Calc Bot", calc_tail)
+                )
                 logger.info(f"✅ Calc Bot Started Polling, token尾号={calc_tail}")
             except Conflict: pass
             except Exception as e: logger.error(f"❌ Calc Bot Polling Error: {e}")
