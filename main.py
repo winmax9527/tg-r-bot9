@@ -39,7 +39,6 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 # 2. 全局变量
 # ==============================================================================
 BOT_APPLICATIONS: Dict[str, Application] = {}
-BOT_APK_URLS: Dict[str, str] = {} 
 BOT_ALLOWED_CHATS: Dict[str, List[str]] = {}
 PLAYWRIGHT_INSTANCE: Playwright | None = None
 BROWSER_INSTANCE: Browser | None = None
@@ -151,7 +150,7 @@ async def safe_reply(update: Update, text: str, parse_mode=None):
         logger.error(f"General Reply Error: {type(e).__name__}: {e}", exc_info=True)
 
 # ==============================================================================
-# 4. 核心业务逻辑 (TG & Potato 共用)
+# 4. 核心业务逻辑
 # ==============================================================================
 
 def generate_universal_subdomain(min_len: int = 4, max_len: int = 7) -> str:
@@ -220,7 +219,7 @@ async def mark_browser_failure(reason: str) -> None:
         await restart_browser(reason)
 
 async def fetch_universal_link_core(api_url: str) -> str:
-    """提取出的核心 Playwright 抓取逻辑，供 TG 和 Potato 共用"""
+    """提取出的核心 Playwright 抓取逻辑，供 Telegram 与网页端共用。"""
     return await asyncio.wait_for(_fetch_universal_link_core_inner(api_url), timeout=PLAYWRIGHT_FETCH_TIMEOUT)
 
 async def _fetch_universal_link_core_inner(api_url: str) -> str:
@@ -283,6 +282,139 @@ async def _fetch_universal_link_core_inner(api_url: str) -> str:
                 logger.warning(f"关闭 Playwright 上下文失败: {e}")
             gc.collect()
 
+
+
+def _first_http_url(value: Any) -> str | None:
+    """从字符串、字典或列表中递归查找第一个 HTTP(S) 地址。"""
+    if isinstance(value, str):
+        text = value.strip().strip('"\'')
+        if text.startswith('//'):
+            return 'https:' + text
+        if text.startswith(('http://', 'https://')):
+            return text
+        match = re.search(r'https?://[^\s\'"<>]+', text, flags=re.IGNORECASE)
+        return match.group(0) if match else None
+
+    if isinstance(value, dict):
+        preferred_keys = (
+            'url', 'apk_url', 'apkUrl', 'download_url', 'downloadUrl',
+            'download', 'location', 'link', 'data',
+        )
+        for key in preferred_keys:
+            if key in value:
+                found = _first_http_url(value[key])
+                if found:
+                    return found
+        for nested in value.values():
+            found = _first_http_url(nested)
+            if found:
+                return found
+
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            found = _first_http_url(item)
+            if found:
+                return found
+
+    return None
+
+
+async def fetch_latest_apk_url(apk_api_url: str, referer: str = '') -> str:
+    """
+    调用动态 APK API，并兼容常见返回形式：
+    1. 301/302/307/308 跳转；
+    2. JSON 中返回 URL；
+    3. 纯文本或 HTML 中包含 URL。
+
+    API 若启用了 Referer ACL，可通过 BOT_n_APK_API_REFERER 配置允许的来源。
+    """
+    if GLOBAL_HTTP_CLIENT is None:
+        raise RuntimeError('HTTP Client 尚未初始化')
+    if not apk_api_url:
+        raise ValueError('APK API URL 未配置')
+
+    headers = {
+        'User-Agent': (
+            'Mozilla/5.0 (Linux; Android 13; Mobile) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/120.0.0.0 Mobile Safari/537.36'
+        ),
+        'Accept': 'text/html,application/xhtml+xml,application/json,text/plain,*/*',
+    }
+    if referer:
+        headers['Referer'] = referer
+
+    response = await GLOBAL_HTTP_CLIENT.get(
+        apk_api_url,
+        headers=headers,
+        follow_redirects=False,
+        timeout=30.0,
+    )
+
+    logger.info(
+        'APK API DEBUG url=%s status=%s content_type=%s location=%s',
+        apk_api_url,
+        response.status_code,
+        response.headers.get('content-type', ''),
+        response.headers.get('location', ''),
+    )
+
+    if response.status_code == 403:
+        raise PermissionError(
+            'APK API 返回 403（Referer ACL）。请配置 BOT_n_APK_API_REFERER，'
+            '并确保该来源已被接口提供方加入白名单。'
+        )
+
+    if response.status_code in (301, 302, 303, 307, 308):
+        location = response.headers.get('location')
+        if not location:
+            raise RuntimeError('APK API 返回跳转状态，但没有 Location')
+        return str(response.url.join(location))
+
+    response.raise_for_status()
+    content_type = response.headers.get('content-type', '').lower()
+
+    if 'json' in content_type:
+        found = _first_http_url(response.json())
+        if found:
+            return found
+        raise RuntimeError('APK API 的 JSON 响应中没有找到下载地址')
+
+    # 如果接口直接返回 APK 文件，则它不是“地址查询接口”，不能把受保护接口地址直接发给用户。
+    if (
+        'application/vnd.android.package-archive' in content_type
+        or 'application/octet-stream' in content_type
+    ):
+        raise RuntimeError('APK API 直接返回文件流，当前模式无法提取可公开访问的下载地址')
+
+    found = _first_http_url(response.text)
+    if found:
+        return found
+
+    raise RuntimeError(f'无法从 APK API 响应中提取下载地址，响应前200字符：{response.text[:200]}')
+
+
+async def resolve_apk_url(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """
+    APK 配置优先级：
+    - 配置 BOT_n_APK_API_URL：调用动态 API；
+    - 否则使用 BOT_n_APK_URL：沿用原静态地址/星号模板。
+
+    两者同时存在时只执行 API，不会重复调用。
+    """
+    apk_api_url = context.bot_data.get('apk_api_url', '')
+    apk_api_referer = context.bot_data.get('apk_api_referer', '')
+    if apk_api_url:
+        return await fetch_latest_apk_url(apk_api_url, apk_api_referer)
+
+    apk_template = context.bot_data.get('apk_url', '')
+    if apk_template:
+        if '*' in apk_template:
+            return apk_template.replace('*', generate_android_specific_subdomain(), 1)
+        return apk_template
+
+    raise ValueError('未配置 APK_URL 或 APK_API_URL')
+
 # ==============================================================================
 # 5. Telegram 工兵处理函数
 # ==============================================================================
@@ -308,15 +440,29 @@ async def get_universal_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 @log_interaction
 async def get_android_specific_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not is_chat_allowed(context, update.message.chat_id): return
-    apk_template = context.bot_data.get("apk_url")
-    if not apk_template: return
+    if not update.message or not is_chat_allowed(context, update.message.chat_id):
+        return
+
+    if not context.bot_data.get('apk_api_url') and not context.bot_data.get('apk_url'):
+        await safe_reply(update, '❌ 配置错误：未找到 APK_URL 或 APK_API_URL。')
+        return
+
     try:
-        random_sub = generate_android_specific_subdomain()
-        final_url = apk_template.replace("*", random_sub, 1)
-        msg = f"✅ <b>您的专属安卓专用链接已生成！</b>\n👇 <b>点击下方链接即可复制：</b>\n<code>{final_url}</code>\n💡 <i>请务必在手机自带浏览器中打开</i>"
+        await safe_reply(update, '⏳ 正在获取最新安卓安装地址，请稍候...')
+        final_url = await resolve_apk_url(context)
+        msg = (
+            '✅ <b>您的专属安卓安装链接已生成！</b>\n'
+            '👇 <b>点击下方链接即可复制：</b>\n'
+            f'<code>{final_url}</code>\n'
+            '💡 <i>请务必在手机自带浏览器中打开</i>'
+        )
         await safe_reply(update, msg, parse_mode='HTML')
-    except Exception: pass
+    except PermissionError as e:
+        logger.error(f'APK API 权限错误: {e}')
+        await safe_reply(update, '❌ APK API 拒绝访问，请检查 Referer 白名单配置。')
+    except Exception as e:
+        logger.error(f'APK 地址获取失败: {e}', exc_info=True)
+        await safe_reply(update, '❌ 获取最新安卓地址失败，请稍后重试。')
 
 @log_interaction
 async def send_static_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, html_msg: str):
@@ -348,108 +494,9 @@ async def send_global_media(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await update.message.reply_text("⚠️ 文件处理失败，可能是视频太大导致 Telegram 拒绝、链接失效或网络波动。")
 
 # ==============================================================================
-# 6. 新增：Potato 机器人完整逻辑
+# 6. 计算器/AI/定时任务逻辑
 # ==============================================================================
 
-async def potato_request(token, method, payload):
-    url = f"https://api.potato.im/bot{token}/{method}"
-    try:
-        if GLOBAL_HTTP_CLIENT is None: return None
-        resp = await GLOBAL_HTTP_CLIENT.post(url, json=payload, timeout=20.0)
-        return resp.json()
-    except Exception as e:
-        logger.error(f"Potato API {method} 失败: {e}")
-        return None
-
-async def handle_potato_update(bot_index, token, update, api_url, apk_url):
-    if "message" not in update or "text" not in update["message"]: return
-    msg = update["message"]
-    chat_id = msg["chat"]["id"]
-    text = msg["text"].strip()
-
-    # --- 1. 通用链接 ---
-    if re.match(UNIVERSAL_COMMAND_PATTERN, text):
-        await potato_request(token, "sendMessage", {"chat_id": chat_id, "text": "正在为您获取专属通用下载链接，请稍候 ..."})
-        if not api_url:
-            await potato_request(token, "sendMessage", {"chat_id": chat_id, "text": "❌ 配置错误：未找到 API。"})
-            return
-        try:
-            final_url = await fetch_universal_link_core(api_url)
-            res = f"✅ <b>您的专属通用下载链接已生成！</b>\n👇 <b>点击下方链接即可复制：</b>\n<code>{final_url}</code>\n💡 <i>请务必在手机自带浏览器中打开</i>"
-            await potato_request(token, "sendMessage", {"chat_id": chat_id, "text": res, "parse_mode": "HTML"})
-        except Exception as e:
-            await potato_request(token, "sendMessage", {"chat_id": chat_id, "text": "❌ 获取失败，请重试。"})
-
-    # --- 2. 安卓专用 ---
-    elif re.match(ANDROID_SPECIFIC_COMMAND_PATTERN, text):
-        if not apk_url: return
-        random_sub = generate_android_specific_subdomain()
-        final_url = apk_url.replace("*", random_sub, 1)
-        res = f"✅ <b>您的专属安卓专用链接已生成！</b>\n👇 <b>点击下方链接即可复制：</b>\n<code>{final_url}</code>\n💡 <i>请务必在手机自带浏览器中打开</i>"
-        await potato_request(token, "sendMessage", {"chat_id": chat_id, "text": res, "parse_mode": "HTML"})
-
-    # --- 3. 静态回复 (还原原版文字) ---
-    elif re.match(IOS_QUIT_PATTERN, text):
-        res = "📱 <b>苹果手机APP大退步骤</b>\n\n1. 上滑停留调出后台。\n2. 上滑关闭App卡片。\n3. 重新点击图标打开。"
-        await potato_request(token, "sendMessage", {"chat_id": chat_id, "text": res, "parse_mode": "HTML"})
-        
-    elif re.match(ANDROID_QUIT_PATTERN, text):
-        res = "🤖 <b>安卓手机APP大退步骤</b>\n\n1. 上滑或点击多任务键进入后台。\n2. 上滑关闭App卡片。\n3. 重新打开App。"
-        await potato_request(token, "sendMessage", {"chat_id": chat_id, "text": res, "parse_mode": "HTML"})
-        
-    elif re.match(ANDROID_BROWSER_PATTERN, text):
-        res = "🤖 <b>安卓浏览器设置手机版</b>\n\n1. 打开浏览器菜单(≡或⋮)。\n2. 找到“桌面版”或“电脑模式”。\n3. <b>取消勾选</b>它。"
-        await potato_request(token, "sendMessage", {"chat_id": chat_id, "text": res, "parse_mode": "HTML"})
-        
-    elif re.match(IOS_BROWSER_PATTERN, text):
-        res = "📱 <b>苹果浏览器设置手机版</b>\n\n1. 点击地址栏左侧(大小/AA)。\n2. 选择“请求移动网站”。\n(如果显示“请求桌面网站”则无需操作)"
-        await potato_request(token, "sendMessage", {"chat_id": chat_id, "text": res, "parse_mode": "HTML"})
-        
-    elif re.match(ANDROID_TAB_LIMIT_PATTERN, text):
-        res = "🤖 <b>安卓窗口上限解决</b>\n\n1. 点击浏览器标签页图标(数字框)。\n2. 选择“关闭所有标签页”或手动关闭旧标签。"
-        await potato_request(token, "sendMessage", {"chat_id": chat_id, "text": res, "parse_mode": "HTML"})
-        
-    elif re.match(IOS_TAB_LIMIT_PATTERN, text):
-        res = "📱 <b>苹果窗口上限解决</b>\n\n1. 长按右下角标签图标。\n2. 选择“关闭所有标签页”。"
-        await potato_request(token, "sendMessage", {"chat_id": chat_id, "text": res, "parse_mode": "HTML"})
-        
-    elif re.match(DOWNLOAD_HELP_PATTERN, text):
-        res = (
-            "🤖 <b>获取 APP 最新下载链接方式</b>\n\n"
-            "📱 <b>通用链接 (苹果/安卓)</b>\n"
-            "✅ 含落地引导页，发送下方任一词：\n"
-            "🔴<code>链接</code>  🔴<code>苹果链接</code>  🔴<code>安卓链接</code>\n"
-            "〰️〰️〰️〰️〰️〰️〰️〰️\n"
-            "📦 <b>安卓专用 (安装包直连)</b>\n"
-            "❌ 无落地页，发送下方任一词：\n"
-            "🔴<code>提包</code>  🔴<code>安卓专用</code>\n\n"
-            "💡 <i>说明：每次重新获取，有效时间为半小时左右！</i>"
-        )
-        await potato_request(token, "sendMessage", {"chat_id": chat_id, "text": res, "parse_mode": "HTML"})
-
-async def potato_worker_loop(bot_index, token, api_url, apk_url):
-    offset = 0
-    logger.info(f"🚀 Potato Bot #{bot_index} 启动轮询中...")
-    while True:
-        try:
-            url = f"https://api.potato.im/bot{token}/getUpdates?offset={offset}&timeout=30"
-            if GLOBAL_HTTP_CLIENT is None:
-                await asyncio.sleep(1)
-                continue
-            resp = await GLOBAL_HTTP_CLIENT.get(url, timeout=40.0)
-            if resp.status_code == 200:
-                data = resp.json()
-                for update in data.get("result", []):
-                    await handle_potato_update(bot_index, token, update, api_url, apk_url)
-                    offset = update["update_id"] + 1
-        except Exception as e:
-            logger.error(f"Potato #{bot_index} 轮询出错: {e}")
-            await asyncio.sleep(10) # 报错缓一缓
-        await asyncio.sleep(0.5)
-
-# ==============================================================================
-# 7. 🔥 计算器/AI/定时任务 逻辑
-# ==============================================================================
 
 async def call_gemini(prompt: str, model: str = "gemini-2.5-flash") -> str:
     MY_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_GEMINI_KEY")
@@ -565,7 +612,7 @@ def do_calc(text):
     except: return None
 
 # ==============================================================================
-# 8. Bot Setup
+# 7. Bot Setup
 # ==============================================================================
 
 def setup_worker_bot(app_instance: Application, bot_index: int) -> None:
@@ -780,7 +827,7 @@ def make_polling_error_callback(name: str, token_tail: str):
     return _callback
 
 # ==============================================================================
-# 9. 启动入口
+# 8. 启动入口
 # ==============================================================================
 app = FastAPI()
 
@@ -931,7 +978,9 @@ async def web_portal(bot_index: int, key: str = Query(None)):
 async def api_generate_link(bot_index: int, link_type: str):
     """处理网页端的获取请求"""
     api_url = os.getenv(f"BOT_{bot_index}_API_URL")
-    apk_url = os.getenv(f"BOT_{bot_index}_APK_URL")
+    apk_url = os.getenv(f"BOT_{bot_index}_APK_URL", "").strip()
+    apk_api_url = os.getenv(f"BOT_{bot_index}_APK_API_URL", "").strip()
+    apk_api_referer = os.getenv(f"BOT_{bot_index}_APK_API_REFERER", "").strip()
 
     if link_type == "uni":
         if not api_url: return {"status": "error", "error": "服务器未配置 API URL"}
@@ -944,15 +993,27 @@ async def api_generate_link(bot_index: int, link_type: str):
             return {"status": "error", "error": "抓取超时或失败，请重试"}
 
     elif link_type == "apk":
-        if not apk_url: return {"status": "error", "error": "服务器未配置 APK URL"}
-        random_sub = generate_android_specific_subdomain()
-        final_url = apk_url.replace("*", random_sub, 1)
-        return {"status": "success", "url": final_url}
+        if not apk_api_url and not apk_url:
+            return {"status": "error", "error": "服务器未配置 APK_URL 或 APK_API_URL"}
+        try:
+            # API 优先；只有未配置 API 时才使用原 APK_URL，不会执行两次。
+            if apk_api_url:
+                final_url = await fetch_latest_apk_url(apk_api_url, apk_api_referer)
+            elif "*" in apk_url:
+                final_url = apk_url.replace("*", generate_android_specific_subdomain(), 1)
+            else:
+                final_url = apk_url
+            return {"status": "success", "url": final_url}
+        except PermissionError:
+            return {"status": "error", "error": "APK API 拒绝访问，请检查 Referer 白名单"}
+        except Exception as e:
+            logger.error(f"网页端获取 APK 地址失败: {e}", exc_info=True)
+            return {"status": "error", "error": "获取最新安卓地址失败"}
 
     return {"status": "error", "error": "未知的请求类型"}
     
 @app.get("/")
-async def root(): return {"status": "ok", "msg": "Bot Service is Running (Shield + Potato Ready)"}
+async def root(): return {"status": "ok", "msg": "Bot Service is Running"}
 
 @app.on_event("startup")
 async def startup_event():
@@ -990,7 +1051,7 @@ async def startup_event():
 
     active_tokens = set()
 
-    # --- 启动工兵 (Telegram 1-10) 及自动挂载 Potato 任务 ---
+    # --- 启动 Telegram 工兵 (1-10) ---
     for i in range(1, 11):
         # 1. 启动 Telegram
         raw_token = os.getenv(f"BOT_TOKEN_{i}")
@@ -1011,9 +1072,17 @@ async def startup_event():
                 
                 api_url = os.getenv(f"BOT_{i}_API_URL", "").strip()
                 apk_url = os.getenv(f"BOT_{i}_APK_URL", "").strip()
-                
-                if api_url: bot.bot_data["api_url"] = api_url
-                if apk_url: bot.bot_data["apk_url"] = apk_url
+                apk_api_url = os.getenv(f"BOT_{i}_APK_API_URL", "").strip()
+                apk_api_referer = os.getenv(f"BOT_{i}_APK_API_REFERER", "").strip()
+
+                if api_url:
+                    bot.bot_data["api_url"] = api_url
+                if apk_url:
+                    bot.bot_data["apk_url"] = apk_url
+                if apk_api_url:
+                    bot.bot_data["apk_api_url"] = apk_api_url
+                if apk_api_referer:
+                    bot.bot_data["apk_api_referer"] = apk_api_referer
                 if al := os.getenv(f"BOT_{i}_ALLOWED_CHAT_IDS", "").strip(): 
                     bot.bot_data["allowed_chats"] = [c.strip() for c in al.split(',')]
                 
@@ -1043,13 +1112,6 @@ async def startup_event():
 
             except Exception as e: logger.error(f"❌ Worker {i} 启动失败: {e}", exc_info=True)
             
-        # 2. 🔥 启动 Potato 机器人协程
-        potato_token = os.getenv(f"POTATO_TOKEN_{i}")
-        if potato_token and potato_token.strip():
-            api_url = os.getenv(f"BOT_{i}_API_URL", "").strip()
-            apk_url = os.getenv(f"BOT_{i}_APK_URL", "").strip()
-            asyncio.create_task(potato_worker_loop(i, potato_token.strip(), api_url, apk_url))
-            logger.info(f"✅ Potato Bot #{i} 任务已挂载")
 
     # --- 启动计算器 ---
     raw_calc_token = os.getenv("CALC_BOT_TOKEN")
