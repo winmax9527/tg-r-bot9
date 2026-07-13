@@ -284,143 +284,50 @@ async def _fetch_universal_link_core_inner(api_url: str) -> str:
 
 
 
-def _first_http_url(value: Any) -> str | None:
-    """从字符串、字典或列表中递归查找第一个 HTTP(S) 地址。"""
-    if isinstance(value, str):
-        text = value.strip().strip('"\'')
-        if text.startswith('//'):
-            return 'https:' + text
-        if text.startswith(('http://', 'https://')):
-            return text
-        match = re.search(r'https?://[^\s\'"<>]+', text, flags=re.IGNORECASE)
-        return match.group(0) if match else None
 
-    if isinstance(value, dict):
-        preferred_keys = (
-            'url', 'apk_url', 'apkUrl', 'download_url', 'downloadUrl',
-            'download', 'location', 'link', 'data',
-        )
-        for key in preferred_keys:
-            if key in value:
-                found = _first_http_url(value[key])
-                if found:
-                    return found
-        for nested in value.values():
-            found = _first_http_url(nested)
-            if found:
-                return found
-
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            found = _first_http_url(item)
-            if found:
-                return found
-
-    return None
-
-
-async def fetch_latest_apk_url(apk_api_url: str) -> str:
+def build_randomized_url(url_template: str, config_name: str = "URL") -> str:
     """
-    调用动态 APK API，并兼容常见返回形式：
-    1. 301/302/307/308 跳转；
-    2. JSON 中返回 URL；
-    3. 纯文本或 HTML 中包含 URL。
+    生成支持随机二级域名的地址。
 
+    示例：
+      https://*.example.com/download
+    每次生成：
+      https://a8k3x.example.com/download
+
+    若模板不包含 *，则原样返回。
     """
-    if GLOBAL_HTTP_CLIENT is None:
-        raise RuntimeError('HTTP Client 尚未初始化')
-    if not apk_api_url:
-        raise ValueError('APK API URL 未配置')
+    url_template = (url_template or "").strip()
+    if not url_template:
+        raise ValueError(f"{config_name} 为空")
 
-    headers = {
-        'User-Agent': (
-            'Mozilla/5.0 (Linux; Android 13; Mobile) '
-            'AppleWebKit/537.36 (KHTML, like Gecko) '
-            'Chrome/120.0.0.0 Mobile Safari/537.36'
-        ),
-        'Accept': 'text/html,application/xhtml+xml,application/json,text/plain,*/*',
-    }
+    if "*" in url_template:
+        random_sub = generate_android_specific_subdomain()
+        return url_template.replace("*", random_sub, 1)
 
-    response = await GLOBAL_HTTP_CLIENT.get(
-        apk_api_url,
-        headers=headers,
-        follow_redirects=False,
-        timeout=30.0,
-    )
-
-    logger.info(
-        'APK API DEBUG url=%s status=%s content_type=%s location=%s',
-        apk_api_url,
-        response.status_code,
-        response.headers.get('content-type', ''),
-        response.headers.get('location', ''),
-    )
-
-    if response.status_code == 403:
-        raise PermissionError('APK API 返回 403，当前请求无法直接取得地址')
-
-    if response.status_code in (301, 302, 303, 307, 308):
-        location = response.headers.get('location')
-        if not location:
-            raise RuntimeError('APK API 返回跳转状态，但没有 Location')
-        return str(response.url.join(location))
-
-    response.raise_for_status()
-    content_type = response.headers.get('content-type', '').lower()
-
-    if 'json' in content_type:
-        found = _first_http_url(response.json())
-        if found:
-            return found
-        raise RuntimeError('APK API 的 JSON 响应中没有找到下载地址')
-
-    # 如果接口直接返回 APK 文件，则它不是“地址查询接口”，不能把受保护接口地址直接发给用户。
-    if (
-        'application/vnd.android.package-archive' in content_type
-        or 'application/octet-stream' in content_type
-    ):
-        raise RuntimeError('APK API 直接返回文件流，当前模式无法提取可公开访问的下载地址')
-
-    found = _first_http_url(response.text)
-    if found:
-        return found
-
-    raise RuntimeError(f'无法从 APK API 响应中提取下载地址，响应前200字符：{response.text[:200]}')
+    return url_template
 
 
-def build_static_apk_url(apk_template: str) -> str:
-    """生成原 APK_URL 地址；存在 * 时仅替换一次随机二级域名。"""
-    apk_template = (apk_template or '').strip()
-    if not apk_template:
-        raise ValueError('APK_URL 为空')
-    if '*' in apk_template:
-        return apk_template.replace('*', generate_android_specific_subdomain(), 1)
-    return apk_template
-
-
-async def resolve_apk_url(context: ContextTypes.DEFAULT_TYPE) -> str:
+def resolve_android_url(context: ContextTypes.DEFAULT_TYPE) -> str:
     """
     安卓地址策略：
-    1. BOT_n_APK_API_URL 有值时，先尝试动态 API；
-    2. API 返回 403、超时、格式异常或其他失败时，自动回退 BOT_n_APK_URL；
-    3. 未配置 API 时，直接使用 BOT_n_APK_URL；
-    4. 最终只返回一个地址，不会向用户发送两次。
-    """
-    apk_api_url = context.bot_data.get('apk_api_url', '').strip()
-    apk_template = context.bot_data.get('apk_url', '').strip()
 
-    if apk_api_url:
-        try:
-            return await fetch_latest_apk_url(apk_api_url)
-        except Exception as e:
-            logger.warning('APK API 获取失败，准备回退 APK_URL: %s', e)
-            if not apk_template:
-                raise
+    1. 优先使用 BOT_n_APK_LANDING_URL；
+    2. 未配置落地页时，回退 BOT_n_APK_URL；
+    3. 两种地址都支持使用 * 随机生成二级域名；
+    4. 最终只生成一个地址，不会重复请求或重复回复。
+
+    APK API 地址属于独立落地页内部配置，Bot 不直接调用。
+    """
+    landing_template = context.bot_data.get("apk_landing_url", "").strip()
+    apk_template = context.bot_data.get("apk_url", "").strip()
+
+    if landing_template:
+        return build_randomized_url(landing_template, "APK_LANDING_URL")
 
     if apk_template:
-        return build_static_apk_url(apk_template)
+        return build_randomized_url(apk_template, "APK_URL")
 
-    raise ValueError('未配置 APK_URL 或 APK_API_URL')
+    raise ValueError("未配置 APK_LANDING_URL 或 APK_URL")
 
 # ==============================================================================
 # 5. Telegram 工兵处理函数
@@ -450,23 +357,22 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
     if not update.message or not is_chat_allowed(context, update.message.chat_id):
         return
 
-    if not context.bot_data.get('apk_api_url') and not context.bot_data.get('apk_url'):
-        await safe_reply(update, '❌ 配置错误：未找到 APK_URL 或 APK_API_URL。')
+    if not context.bot_data.get("apk_landing_url") and not context.bot_data.get("apk_url"):
+        await safe_reply(update, "❌ 配置错误：未找到 APK_LANDING_URL 或 APK_URL。")
         return
 
     try:
-        await safe_reply(update, '⏳ 正在获取最新安卓安装地址，请稍候...')
-        final_url = await resolve_apk_url(context)
+        final_url = resolve_android_url(context)
         msg = (
-            '✅ <b>您的专属安卓安装链接已生成！</b>\n'
-            '👇 <b>点击下方链接即可复制：</b>\n'
-            f'<code>{final_url}</code>\n'
-            '💡 <i>请务必在手机自带浏览器中打开</i>'
+            "✅ <b>您的专属安卓下载入口已生成！</b>\n"
+            "👇 <b>点击下方链接即可打开：</b>\n"
+            f"<code>{final_url}</code>\n"
+            "💡 <i>请务必在手机自带浏览器中打开</i>"
         )
-        await safe_reply(update, msg, parse_mode='HTML')
+        await safe_reply(update, msg, parse_mode="HTML")
     except Exception as e:
-        logger.error(f'APK 地址获取失败: {e}', exc_info=True)
-        await safe_reply(update, '❌ 获取最新安卓地址失败，请稍后重试。')
+        logger.error(f"安卓下载入口生成失败: {e}", exc_info=True)
+        await safe_reply(update, "❌ 安卓下载入口生成失败，请稍后重试。")
 
 @log_interaction
 async def send_static_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, html_msg: str):
@@ -983,7 +889,7 @@ async def api_generate_link(bot_index: int, link_type: str):
     """处理网页端的获取请求"""
     api_url = os.getenv(f"BOT_{bot_index}_API_URL")
     apk_url = os.getenv(f"BOT_{bot_index}_APK_URL", "").strip()
-    apk_api_url = os.getenv(f"BOT_{bot_index}_APK_API_URL", "").strip()
+    apk_landing_url = os.getenv(f"BOT_{bot_index}_APK_LANDING_URL", "").strip()
 
     if link_type == "uni":
         if not api_url: return {"status": "error", "error": "服务器未配置 API URL"}
@@ -996,24 +902,19 @@ async def api_generate_link(bot_index: int, link_type: str):
             return {"status": "error", "error": "抓取超时或失败，请重试"}
 
     elif link_type == "apk":
-        if not apk_api_url and not apk_url:
-            return {"status": "error", "error": "服务器未配置 APK_URL 或 APK_API_URL"}
+        if not apk_landing_url and not apk_url:
+            return {"status": "error", "error": "服务器未配置 APK_LANDING_URL 或 APK_URL"}
         try:
-            # API 优先；API 失败后才回退 APK_URL。最终只返回一个地址。
-            if apk_api_url:
-                try:
-                    final_url = await fetch_latest_apk_url(apk_api_url)
-                except Exception as api_error:
-                    logger.warning(f"网页端 APK API 获取失败，回退 APK_URL: {api_error}")
-                    if not apk_url:
-                        raise
-                    final_url = build_static_apk_url(apk_url)
+            # 优先返回独立安卓落地页；未配置时回退旧 APK_URL。
+            # 两者均支持使用 * 随机生成二级域名。
+            if apk_landing_url:
+                final_url = build_randomized_url(apk_landing_url, "APK_LANDING_URL")
             else:
-                final_url = build_static_apk_url(apk_url)
+                final_url = build_randomized_url(apk_url, "APK_URL")
             return {"status": "success", "url": final_url}
         except Exception as e:
-            logger.error(f"网页端获取 APK 地址失败: {e}", exc_info=True)
-            return {"status": "error", "error": "获取最新安卓地址失败"}
+            logger.error(f"网页端生成安卓下载入口失败: {e}", exc_info=True)
+            return {"status": "error", "error": "安卓下载入口生成失败"}
 
     return {"status": "error", "error": "未知的请求类型"}
     
@@ -1077,14 +978,14 @@ async def startup_event():
                 
                 api_url = os.getenv(f"BOT_{i}_API_URL", "").strip()
                 apk_url = os.getenv(f"BOT_{i}_APK_URL", "").strip()
-                apk_api_url = os.getenv(f"BOT_{i}_APK_API_URL", "").strip()
+                apk_landing_url = os.getenv(f"BOT_{i}_APK_LANDING_URL", "").strip()
 
                 if api_url:
                     bot.bot_data["api_url"] = api_url
                 if apk_url:
                     bot.bot_data["apk_url"] = apk_url
-                if apk_api_url:
-                    bot.bot_data["apk_api_url"] = apk_api_url
+                if apk_landing_url:
+                    bot.bot_data["apk_landing_url"] = apk_landing_url
                 if al := os.getenv(f"BOT_{i}_ALLOWED_CHAT_IDS", "").strip(): 
                     bot.bot_data["allowed_chats"] = [c.strip() for c in al.split(',')]
                 
