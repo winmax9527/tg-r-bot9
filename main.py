@@ -319,14 +319,13 @@ def _first_http_url(value: Any) -> str | None:
     return None
 
 
-async def fetch_latest_apk_url(apk_api_url: str, referer: str = '') -> str:
+async def fetch_latest_apk_url(apk_api_url: str) -> str:
     """
     调用动态 APK API，并兼容常见返回形式：
     1. 301/302/307/308 跳转；
     2. JSON 中返回 URL；
     3. 纯文本或 HTML 中包含 URL。
 
-    API 若启用了 Referer ACL，可通过 BOT_n_APK_API_REFERER 配置允许的来源。
     """
     if GLOBAL_HTTP_CLIENT is None:
         raise RuntimeError('HTTP Client 尚未初始化')
@@ -341,8 +340,6 @@ async def fetch_latest_apk_url(apk_api_url: str, referer: str = '') -> str:
         ),
         'Accept': 'text/html,application/xhtml+xml,application/json,text/plain,*/*',
     }
-    if referer:
-        headers['Referer'] = referer
 
     response = await GLOBAL_HTTP_CLIENT.get(
         apk_api_url,
@@ -360,10 +357,7 @@ async def fetch_latest_apk_url(apk_api_url: str, referer: str = '') -> str:
     )
 
     if response.status_code == 403:
-        raise PermissionError(
-            'APK API 返回 403（Referer ACL）。请配置 BOT_n_APK_API_REFERER，'
-            '并确保该来源已被接口提供方加入白名单。'
-        )
+        raise PermissionError('APK API 返回 403，当前请求无法直接取得地址')
 
     if response.status_code in (301, 302, 303, 307, 308):
         location = response.headers.get('location')
@@ -394,24 +388,37 @@ async def fetch_latest_apk_url(apk_api_url: str, referer: str = '') -> str:
     raise RuntimeError(f'无法从 APK API 响应中提取下载地址，响应前200字符：{response.text[:200]}')
 
 
+def build_static_apk_url(apk_template: str) -> str:
+    """生成原 APK_URL 地址；存在 * 时仅替换一次随机二级域名。"""
+    apk_template = (apk_template or '').strip()
+    if not apk_template:
+        raise ValueError('APK_URL 为空')
+    if '*' in apk_template:
+        return apk_template.replace('*', generate_android_specific_subdomain(), 1)
+    return apk_template
+
+
 async def resolve_apk_url(context: ContextTypes.DEFAULT_TYPE) -> str:
     """
-    APK 配置优先级：
-    - 配置 BOT_n_APK_API_URL：调用动态 API；
-    - 否则使用 BOT_n_APK_URL：沿用原静态地址/星号模板。
-
-    两者同时存在时只执行 API，不会重复调用。
+    安卓地址策略：
+    1. BOT_n_APK_API_URL 有值时，先尝试动态 API；
+    2. API 返回 403、超时、格式异常或其他失败时，自动回退 BOT_n_APK_URL；
+    3. 未配置 API 时，直接使用 BOT_n_APK_URL；
+    4. 最终只返回一个地址，不会向用户发送两次。
     """
-    apk_api_url = context.bot_data.get('apk_api_url', '')
-    apk_api_referer = context.bot_data.get('apk_api_referer', '')
-    if apk_api_url:
-        return await fetch_latest_apk_url(apk_api_url, apk_api_referer)
+    apk_api_url = context.bot_data.get('apk_api_url', '').strip()
+    apk_template = context.bot_data.get('apk_url', '').strip()
 
-    apk_template = context.bot_data.get('apk_url', '')
+    if apk_api_url:
+        try:
+            return await fetch_latest_apk_url(apk_api_url)
+        except Exception as e:
+            logger.warning('APK API 获取失败，准备回退 APK_URL: %s', e)
+            if not apk_template:
+                raise
+
     if apk_template:
-        if '*' in apk_template:
-            return apk_template.replace('*', generate_android_specific_subdomain(), 1)
-        return apk_template
+        return build_static_apk_url(apk_template)
 
     raise ValueError('未配置 APK_URL 或 APK_API_URL')
 
@@ -457,9 +464,6 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
             '💡 <i>请务必在手机自带浏览器中打开</i>'
         )
         await safe_reply(update, msg, parse_mode='HTML')
-    except PermissionError as e:
-        logger.error(f'APK API 权限错误: {e}')
-        await safe_reply(update, '❌ APK API 拒绝访问，请检查 Referer 白名单配置。')
     except Exception as e:
         logger.error(f'APK 地址获取失败: {e}', exc_info=True)
         await safe_reply(update, '❌ 获取最新安卓地址失败，请稍后重试。')
@@ -980,7 +984,6 @@ async def api_generate_link(bot_index: int, link_type: str):
     api_url = os.getenv(f"BOT_{bot_index}_API_URL")
     apk_url = os.getenv(f"BOT_{bot_index}_APK_URL", "").strip()
     apk_api_url = os.getenv(f"BOT_{bot_index}_APK_API_URL", "").strip()
-    apk_api_referer = os.getenv(f"BOT_{bot_index}_APK_API_REFERER", "").strip()
 
     if link_type == "uni":
         if not api_url: return {"status": "error", "error": "服务器未配置 API URL"}
@@ -996,16 +999,18 @@ async def api_generate_link(bot_index: int, link_type: str):
         if not apk_api_url and not apk_url:
             return {"status": "error", "error": "服务器未配置 APK_URL 或 APK_API_URL"}
         try:
-            # API 优先；只有未配置 API 时才使用原 APK_URL，不会执行两次。
+            # API 优先；API 失败后才回退 APK_URL。最终只返回一个地址。
             if apk_api_url:
-                final_url = await fetch_latest_apk_url(apk_api_url, apk_api_referer)
-            elif "*" in apk_url:
-                final_url = apk_url.replace("*", generate_android_specific_subdomain(), 1)
+                try:
+                    final_url = await fetch_latest_apk_url(apk_api_url)
+                except Exception as api_error:
+                    logger.warning(f"网页端 APK API 获取失败，回退 APK_URL: {api_error}")
+                    if not apk_url:
+                        raise
+                    final_url = build_static_apk_url(apk_url)
             else:
-                final_url = apk_url
+                final_url = build_static_apk_url(apk_url)
             return {"status": "success", "url": final_url}
-        except PermissionError:
-            return {"status": "error", "error": "APK API 拒绝访问，请检查 Referer 白名单"}
         except Exception as e:
             logger.error(f"网页端获取 APK 地址失败: {e}", exc_info=True)
             return {"status": "error", "error": "获取最新安卓地址失败"}
@@ -1073,7 +1078,6 @@ async def startup_event():
                 api_url = os.getenv(f"BOT_{i}_API_URL", "").strip()
                 apk_url = os.getenv(f"BOT_{i}_APK_URL", "").strip()
                 apk_api_url = os.getenv(f"BOT_{i}_APK_API_URL", "").strip()
-                apk_api_referer = os.getenv(f"BOT_{i}_APK_API_REFERER", "").strip()
 
                 if api_url:
                     bot.bot_data["api_url"] = api_url
@@ -1081,8 +1085,6 @@ async def startup_event():
                     bot.bot_data["apk_url"] = apk_url
                 if apk_api_url:
                     bot.bot_data["apk_api_url"] = apk_api_url
-                if apk_api_referer:
-                    bot.bot_data["apk_api_referer"] = apk_api_referer
                 if al := os.getenv(f"BOT_{i}_ALLOWED_CHAT_IDS", "").strip(): 
                     bot.bot_data["allowed_chats"] = [c.strip() for c in al.split(',')]
                 
