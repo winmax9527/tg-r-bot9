@@ -329,6 +329,93 @@ def resolve_android_url(context: ContextTypes.DEFAULT_TYPE) -> str:
 
     raise ValueError("未配置 APK_LANDING_URL 或 APK_URL")
 
+
+def parse_apk_ttl_seconds(raw_value: Any, bot_index: int | None = None) -> int:
+    """读取 BOT_n_APK_TTL_SECONDS；无效配置回退为 24 小时。"""
+    default_ttl = 86400
+    try:
+        ttl_seconds = int(str(raw_value or default_ttl).strip())
+        if 60 <= ttl_seconds <= 31536000:
+            return ttl_seconds
+    except (TypeError, ValueError):
+        pass
+
+    bot_label = f"BOT_{bot_index}" if bot_index is not None else "BOT"
+    logger.warning(
+        f"⚠️ {bot_label}_APK_TTL_SECONDS 配置无效，已回退为 {default_ttl} 秒"
+    )
+    return default_ttl
+
+
+async def register_android_url(
+    final_url: str,
+    register_api: str,
+    register_api_key: str,
+    ttl_seconds: int,
+    bot_index: int,
+) -> None:
+    """
+    将刚生成的随机安卓二级域名登记到香港 VPS。
+
+    未配置登记 API 与 Key 时保持原有行为；只配置其中一项时直接报配置错误，
+    防止 Bot 发出一个后台无法识别有效期的链接。
+    """
+    register_api = (register_api or "").strip()
+    register_api_key = (register_api_key or "").strip()
+
+    if not register_api and not register_api_key:
+        return
+    if not register_api or not register_api_key:
+        raise ValueError(
+            f"BOT_{bot_index}_APK_REGISTER_API 与 "
+            f"BOT_{bot_index}_APK_REGISTER_API_KEY 必须同时配置"
+        )
+    if GLOBAL_HTTP_CLIENT is None:
+        raise RuntimeError("HTTP Client error")
+
+    parse_target = final_url if "://" in final_url else f"https://{final_url}"
+    hostname = (urlparse(parse_target).hostname or "").strip().lower()
+    if not hostname:
+        raise ValueError(f"无法从安卓地址提取域名: {final_url}")
+
+    payload = {
+        "hostname": hostname,
+        "ttl_seconds": ttl_seconds,
+        "external_id": f"bot-{bot_index}",
+    }
+    response = await GLOBAL_HTTP_CLIENT.post(
+        register_api,
+        headers={"X-API-Key": register_api_key},
+        json=payload,
+        timeout=15.0,
+    )
+    response.raise_for_status()
+    result = response.json()
+    if not result.get("ok"):
+        raise RuntimeError(f"安卓随机域名登记失败: {result}")
+
+    logger.info(
+        f"✅ BOT_{bot_index} 安卓随机域名已登记: "
+        f"hostname={hostname} expires_at={result.get('expires_at')}"
+    )
+
+
+async def register_context_android_url(
+    final_url: str,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """读取当前 BOT_n 的登记配置，并登记 Telegram 入口生成的安卓域名。"""
+    bot_index = int(context.bot_data.get("bot_index", 0))
+    await register_android_url(
+        final_url=final_url,
+        register_api=context.bot_data.get("apk_register_api", ""),
+        register_api_key=context.bot_data.get("apk_register_api_key", ""),
+        ttl_seconds=parse_apk_ttl_seconds(
+            context.bot_data.get("apk_ttl_seconds", 86400), bot_index
+        ),
+        bot_index=bot_index,
+    )
+
 # ==============================================================================
 # 5. Telegram 工兵处理函数
 # ==============================================================================
@@ -363,6 +450,7 @@ async def get_android_specific_link(update: Update, context: ContextTypes.DEFAUL
 
     try:
         final_url = resolve_android_url(context)
+        await register_context_android_url(final_url, context)
         msg = (
             "✅ <b>您的专属安卓下载入口已生成！</b>\n"
             "👇 <b>点击下方链接即可打开：</b>\n"
@@ -890,6 +978,11 @@ async def api_generate_link(bot_index: int, link_type: str):
     api_url = os.getenv(f"BOT_{bot_index}_API_URL")
     apk_url = os.getenv(f"BOT_{bot_index}_APK_URL", "").strip()
     apk_landing_url = os.getenv(f"BOT_{bot_index}_APK_LANDING_URL", "").strip()
+    apk_register_api = os.getenv(f"BOT_{bot_index}_APK_REGISTER_API", "").strip()
+    apk_register_api_key = os.getenv(f"BOT_{bot_index}_APK_REGISTER_API_KEY", "").strip()
+    apk_ttl_seconds = parse_apk_ttl_seconds(
+        os.getenv(f"BOT_{bot_index}_APK_TTL_SECONDS", "86400"), bot_index
+    )
 
     if link_type == "uni":
         if not api_url: return {"status": "error", "error": "服务器未配置 API URL"}
@@ -911,6 +1004,13 @@ async def api_generate_link(bot_index: int, link_type: str):
                 final_url = build_randomized_url(apk_landing_url, "APK_LANDING_URL")
             else:
                 final_url = build_randomized_url(apk_url, "APK_URL")
+            await register_android_url(
+                final_url=final_url,
+                register_api=apk_register_api,
+                register_api_key=apk_register_api_key,
+                ttl_seconds=apk_ttl_seconds,
+                bot_index=bot_index,
+            )
             return {"status": "success", "url": final_url}
         except Exception as e:
             logger.error(f"网页端生成安卓下载入口失败: {e}", exc_info=True)
@@ -979,6 +1079,11 @@ async def startup_event():
                 api_url = os.getenv(f"BOT_{i}_API_URL", "").strip()
                 apk_url = os.getenv(f"BOT_{i}_APK_URL", "").strip()
                 apk_landing_url = os.getenv(f"BOT_{i}_APK_LANDING_URL", "").strip()
+                apk_register_api = os.getenv(f"BOT_{i}_APK_REGISTER_API", "").strip()
+                apk_register_api_key = os.getenv(f"BOT_{i}_APK_REGISTER_API_KEY", "").strip()
+                apk_ttl_seconds = parse_apk_ttl_seconds(
+                    os.getenv(f"BOT_{i}_APK_TTL_SECONDS", "86400"), i
+                )
 
                 if api_url:
                     bot.bot_data["api_url"] = api_url
@@ -986,6 +1091,11 @@ async def startup_event():
                     bot.bot_data["apk_url"] = apk_url
                 if apk_landing_url:
                     bot.bot_data["apk_landing_url"] = apk_landing_url
+                if apk_register_api:
+                    bot.bot_data["apk_register_api"] = apk_register_api
+                if apk_register_api_key:
+                    bot.bot_data["apk_register_api_key"] = apk_register_api_key
+                bot.bot_data["apk_ttl_seconds"] = apk_ttl_seconds
                 if al := os.getenv(f"BOT_{i}_ALLOWED_CHAT_IDS", "").strip(): 
                     bot.bot_data["allowed_chats"] = [c.strip() for c in al.split(',')]
                 
