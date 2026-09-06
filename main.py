@@ -262,8 +262,20 @@ async def _fetch_universal_link_core_inner(api_url: str) -> str:
             final_url_b = page.url
             if "chrome-error" in final_url_b: raise Exception("Chrome Error")
 
-            rand_sub = generate_universal_subdomain()
-            final_url = modify_url_subdomain(final_url_b, rand_sub)
+            # CloudFront 特殊处理：AWS CloudFront 分配域名不可修改二级域名
+            # 例如：https://d3b8zo.cloudfront.net/xxx/app.apk
+            # 必须保持 d3b8zo.cloudfront.net 原样，否则会导致访问失败。
+            parsed_url = urlparse(final_url_b)
+            hostname = (parsed_url.hostname or "").lower()
+
+            if hostname.endswith(".cloudfront.net"):
+                final_url = final_url_b
+                logger.info(f"☁️ CloudFront 域名，保持原始地址: {final_url}")
+            else:
+                # 普通域名继续执行原有随机二级域名逻辑
+                rand_sub = generate_universal_subdomain()
+                final_url = modify_url_subdomain(final_url_b, rand_sub)
+
             await mark_browser_success()
             return final_url
         except Exception as e:
